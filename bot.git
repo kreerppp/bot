@@ -6,7 +6,7 @@ import logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # Словари для хранения данных
-admins = set()  # Хранит ID администраторов
+admins = set(8987243077)  # Хранит ID администраторов
 purchases = []  # Хранит список покупок
 nfts = {}  # Хранит NFT
 users = {}  # Хранит юзеры и их стоимость
