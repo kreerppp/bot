@@ -1,92 +1,754 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+import asyncio
 import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties
+import sqlite3
+import json
 
-# Убедитесь, что вы настроили ведение журналов
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
 
-# Словари для хранения данных
-admins = set(8987243077)  # Хранит ID администраторов
-purchases = []  # Хранит список покупок
-nfts = {}  # Хранит NFT
-users = {}  # Хранит юзеры и их стоимость
-paused = False  # Статус паузы
+# Инициализация бота
+API_TOKEN = '8412822055:AAFyWlyesVN2gDfxVe7ekfegd36P_y9tx3w'  # Замените на токен вашего бота
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-async def start(update: Update, context) -> None:
-    if paused:
-        await update.message.reply_text('Бот приостановлен администрацией.')
-        return
+# Инициализация базы данных
+conn = sqlite3.connect('shop.db')
+cursor = conn.cursor()
 
-    keyboard = [
-        [InlineKeyboardButton("Магазин", callback_data='shop')],
-        [InlineKeyboardButton("О боте", callback_data='about')],
-        [InlineKeyboardButton("Поддержка", callback_data='support')]
-    ]
+# Создание таблиц
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS admins (
+    user_id INTEGER PRIMARY KEY
+)
+''')
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Это неофициальный бот по покупке звезд и НФТ.', reply_markup=reply_markup)
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS nfts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    number TEXT,
+    price INTEGER
+)
+''')
 
-async def shop(update: Update, context) -> None:
-    keyboard = [
-        [InlineKeyboardButton("Звезды", callback_data='buy_stars')],
-        [InlineKeyboardButton("NFT", callback_data='buy_nft')],
-        [InlineKeyboardButton("Юз", callback_data='buy_user')]
-    ]
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS usernames (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    price INTEGER
+)
+''')
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(text='Выберите категорию:', reply_markup=reply_markup)
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    username TEXT,
+    item_type TEXT,
+    item_name TEXT,
+    amount INTEGER,
+    status TEXT DEFAULT 'pending'
+)
+''')
 
-async def buy_stars(update: Update, context) -> None:
-    await update.callback_query.edit_message_text(text='Напишите свой юз в shuzagram:')
-    context.user_data['buying'] = 'stars'
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS bot_status (
+    id INTEGER PRIMARY KEY,
+    is_active BOOLEAN DEFAULT 1
+)
+''')
 
-async def handle_username(update: Update, context) -> None:
-    username = update.message.text
-    if 'buying' in context.user_data:
-        buying_type = context.user_data['buying']
-        if buying_type == 'stars':
-            await update.message.reply_text('Сколько звезд вы хотите купить? (например, 1000)')
-            context.user_data['username'] = username
+# Вставка начального статуса бота, если его нет
+cursor.execute("INSERT OR IGNORE INTO bot_status (id, is_active) VALUES (1, 1)")
 
-async def admin_panel(update: Update, context) -> None:
-    if update.message.from_user.id in admins:
+# Добавление начального админа (замените на свой ID)
+cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (8987243077,))
+
+conn.commit()
+
+# Состояния FSM
+class ShopStates(StatesGroup):
+    waiting_for_username = State()
+    waiting_for_stars_amount = State()
+    waiting_for_nft_username = State()
+    waiting_for_nft_selection = State()
+    waiting_for_username_purchase = State()
+    waiting_for_username_selection = State()
+    waiting_for_admin_add = State()
+    waiting_for_nft_add_name = State()
+    waiting_for_nft_add_number = State()
+    waiting_for_nft_add_price = State()
+    waiting_for_username_add = State()
+    waiting_for_username_price = State()
+    waiting_for_admin_remove = State()
+    waiting_for_nft_remove = State()
+    waiting_for_username_remove = State()
+
+# Вспомогательные функции
+def is_admin(user_id):
+    cursor.execute("SELECT user_id FROM admins WHERE user_id = ?", (user_id,))
+    return cursor.fetchone() is not None
+
+def is_bot_active():
+    cursor.execute("SELECT is_active FROM bot_status WHERE id = 1")
+    result = cursor.fetchone()
+    return result[0] == 1 if result else True
+
+def get_main_keyboard(user_id):
+    keyboard = []
+    if is_admin(user_id):
         keyboard = [
-            [InlineKeyboardButton("Выключить бота", callback_data='pause_bot')],
-            [InlineKeyboardButton("Посмотреть покупки", callback_data='view_purchases')],
-            [InlineKeyboardButton("Добавить NFT", callback_data='add_nft')],
-            [InlineKeyboardButton("Добавить юз", callback_data='add_user')],
-            [InlineKeyboardButton("Добавить админа", callback_data='add_admin')],
-            [InlineKeyboardButton("Убрать админа", callback_data='remove_admin')],
-            [InlineKeyboardButton("Убрать NFT", callback_data='remove_nft')],
-            [InlineKeyboardButton("Убрать юз", callback_data='remove_user')]
+            [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")],
+            [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")],
+            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
+            [InlineKeyboardButton(text="👑 Админ панель", callback_data="admin_panel")]
         ]
+    else:
+        keyboard = [
+            [InlineKeyboardButton(text="🛍 Магазин", callback_data="shop")],
+            [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")],
+            [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")]
+        ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text('Админ панель:', reply_markup=reply_markup)
+def get_shop_keyboard():
+    keyboard = [
+        [InlineKeyboardButton(text="⭐️ Звезды", callback_data="stars")],
+        [InlineKeyboardButton(text="🎨 NFT", callback_data="nft")],
+        [InlineKeyboardButton(text="👤 Юз", callback_data="username")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+def get_admin_keyboard():
+    keyboard = [
+        [InlineKeyboardButton(text="🔴 Выключить бота", callback_data="toggle_bot")],
+        [InlineKeyboardButton(text="📊 Посмотреть покупки", callback_data="view_purchases")],
+        [InlineKeyboardButton(text="➕ Добавить NFT", callback_data="add_nft")],
+        [InlineKeyboardButton(text="➕ Добавить Юз", callback_data="add_username")],
+        [InlineKeyboardButton(text="👥 Добавить админа", callback_data="add_admin")],
+        [InlineKeyboardButton(text="➖ Убрать админа", callback_data="remove_admin")],
+        [InlineKeyboardButton(text="➖ Убрать NFT", callback_data="remove_nft")],
+        [InlineKeyboardButton(text="➖ Убрать Юз", callback_data="remove_username")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-async def handle_admin_queries(update: Update, context) -> None:
-    callback_data = update.callback_query.data
-    if callback_data == 'pause_bot':
-        global paused
-        paused = True
-        await update.callback_query.edit_message_text("Бот выключен для обычных пользователей.")
-    elif callback_data == 'view_purchases':
-        await update.callback_query.edit_message_text("\n".join(purchases) if purchases else "Нет покупок.")
-    # Добавьте обработку других admin функций...
+def get_stars_keyboard():
+    keyboard = [
+        [InlineKeyboardButton(text="1000 звезд = 10 ⭐️", callback_data="stars_1000")],
+        [InlineKeyboardButton(text="5000 звезд = 50 ⭐️", callback_data="stars_5000")],
+        [InlineKeyboardButton(text="10000 звезд = 100 ⭐️", callback_data="stars_10000")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="shop")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+# Обработчики команд
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not is_bot_active() and not is_admin(user_id):
+        await message.answer("🔴 Бот приостановлен администрацией.")
+        return
+    
+    if is_admin(user_id):
+        await message.answer(
+            "👋 Добро пожаловать в shuzashop!\n\n"
+            "Это не официальный бот по покупке звезд, анона и т.д.\n\n"
+            "Выберите действие:",
+            reply_markup=get_main_keyboard(user_id)
+        )
+    else:
+        await message.answer(
+            "👋 Добро пожаловать в shuzashop!\n\n"
+            "Это не официальный бот по покупке звезд, анона и т.д.\n\n"
+            "Выберите действие:",
+            reply_markup=get_main_keyboard(user_id)
+        )
+
+# Обработчики callback
+@dp.callback_query(F.data == "shop")
+async def shop_handler(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🛍 Выбери категорию:",
+        reply_markup=get_shop_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "about")
+async def about_handler(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "ℹ️ <b>О боте</b>\n\n"
+        "Этот бот создан для покупки различных цифровых товаров.\n"
+        "Мы не являемся официальным магазином.\n\n"
+        "Будьте внимательны при указании username!",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "support")
+async def support_handler(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🆘 <b>Поддержка</b>\n\n"
+        "По всем вопросам обращайтесь:\n"
+        "@support_username",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_main")
+async def back_to_main_handler(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "👋 Главное меню:",
+        reply_markup=get_main_keyboard(callback.from_user.id)
+    )
+    await callback.answer()
+
+# Обработчики звезд
+@dp.callback_query(F.data == "stars")
+async def stars_handler(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ShopStates.waiting_for_username)
+    await callback.message.edit_text(
+        "📝 Введите ваш username в shuzagram:"
+    )
+    await callback.answer()
+
+@dp.message(ShopStates.waiting_for_username)
+async def process_stars_username(message: types.Message, state: FSMContext):
+    await state.update_data(username=message.text)
+    await state.set_state(ShopStates.waiting_for_stars_amount)
+    await message.answer(
+        "💰 Сколько звезд вы хотите купить?",
+        reply_markup=get_stars_keyboard()
+    )
+@dp.callback_query(F.data.startswith("stars_"))
+async def process_stars_amount(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    username = data.get('username')
+    amount = int(callback.data.split("_")[1])
+    price = amount // 100  # Цена в Telegram Stars
+    
+    await state.clear()
+    
+    # Отправка счета
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Покупка звезд",
+        description=f"Покупка {amount} звезд для пользователя {username}",
+        payload=f"stars_{amount}_{username}",
+        provider_token="",  # Для Telegram Stars
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{amount} звезд", amount=price)]
+    )
+    await callback.message.delete()
+    await callback.answer()
+
+# Обработчики NFT
+@dp.callback_query(F.data == "nft")
+async def nft_handler(callback: types.CallbackQuery, state: FSMContext):
+    cursor.execute("SELECT id, name, number, price FROM nfts")
+    nfts = cursor.fetchall()
+    
+    if not nfts:
+        await callback.answer("Нет доступных NFT", show_alert=True)
+        return
+    
+    keyboard = []
+    for nft in nfts:
+        keyboard.append([InlineKeyboardButton(
+            text=f"{nft[1]} #{nft[2]} - {nft[3]} ⭐️",
+            callback_data=f"select_nft_{nft[0]}"
+        )])
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="shop")])
+    
+    await state.set_state(ShopStates.waiting_for_nft_selection)
+    await callback.message.edit_text(
+        "🎨 Выберите NFT:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("select_nft_"))
+async def select_nft_handler(callback: types.CallbackQuery, state: FSMContext):
+    nft_id = int(callback.data.split("_")[2])
+    cursor.execute("SELECT name, price FROM nfts WHERE id = ?", (nft_id,))
+    nft = cursor.fetchone()
+    
+    if nft:
+        await state.update_data(nft_id=nft_id, nft_name=nft[0], nft_price=nft[1])
+        await state.set_state(ShopStates.waiting_for_nft_username)
+        await callback.message.edit_text(
+            "📝 Введите ваш username в shuzagram:"
+        )
+    await callback.answer()
+
+@dp.message(ShopStates.waiting_for_nft_username)
+async def process_nft_username(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    username = message.text
+    
+    await bot.send_invoice(
+        chat_id=message.from_user.id,
+        title=f"NFT: {data['nft_name']}",
+        description=f"Покупка NFT {data['nft_name']} для пользователя {username}",
+        payload=f"nft_{data['nft_id']}_{username}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=f"NFT {data['nft_name']}", amount=data['nft_price'])]
+    )
+    await state.clear()
+
+# Обработчики username
+@dp.callback_query(F.data == "username")
+async def username_handler(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ShopStates.waiting_for_username_purchase)
+    await callback.message.edit_text(
+        "📝 Введите ваш username в shuzagram:"
+    )
+    await callback.answer()
+
+@dp.message(ShopStates.waiting_for_username_purchase)
+async def process_username_purchase(message: types.Message, state: FSMContext):
+    await state.update_data(shuza_username=message.text)
+    
+    cursor.execute("SELECT id, username, price FROM usernames")
+    usernames = cursor.fetchall()
+    
+    if not usernames:
+        await message.answer("Нет доступных username")
+        return
+    
+    keyboard = []
+    for user in usernames:
+        keyboard.append([InlineKeyboardButton(
+            text=f"@{user[1]} - {user[2]} ⭐️",
+            callback_data=f"select_username_{user[0]}"
+        )])
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="shop")])
+    
+    await state.set_state(ShopStates.waiting_for_username_selection)
+    await message.answer(
+        "👤 Выберите username:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+@dp.callback_query(F.data.startswith("select_username_"))
+async def select_username_handler(callback: types.CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.split("_")[2])
+    cursor.execute("SELECT username, price FROM usernames WHERE id = ?", (user_id,))
+    user_data = cursor.fetchone()
+    data = await state.get_data()
+    shuza_username = data.get('shuza_username')
+    
+    if user_data:
+        await bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title=f"Username: @{user_data[0]}",
+            description=f"Покупка username @{user_data[0]} для пользователя {shuza_username}",
+            payload=f"username_{user_id}_{shuza_username}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label=f"Username @{user_data[0]}", amount=user_data[1])]
+        )
+    await state.clear()
+    await callback.message.delete()
+    await callback.answer()
+
+# Обработка платежей
+@dp.pre_checkout_query()
+async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def process_successful_payment(message: types.Message):
+    payment = message.successful_payment
+    payload = payment.invoice_payload
+    user_id = message.from_user.id
+    
+    # Парсинг payload
+    parts = payload.split("_")
+    item_type = parts[0]
+    
+    if item_type == "stars":
+        amount = parts[1]
+        username = parts[2]
+        cursor.execute(
+            "INSERT INTO purchases (user_id, username, item_type, item_name, amount) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, "stars", f"{amount} звезд", int(amount))
+        )
+        await message.answer(
+            f"✅ Спасибо за покупку!\n"
+            f"Ожидайте выдачи {amount} звезд на аккаунт {username}.\n\n"
+            f"⚠️ Если username был указан неправильно, возврат средств не производится!"
+        )
+    
+    elif item_type == "nft":
+        nft_id = parts[1]
+        username = parts[2]
+        cursor.execute("SELECT name FROM nfts WHERE id = ?", (nft_id,))
+        nft = cursor.fetchone()
+        if nft:
+            cursor.execute(
+                "INSERT INTO purchases (user_id, username, item_type, item_name) VALUES (?, ?, ?, ?)",
+                (user_id, username, "nft", nft[0])
+            )
+            await message.answer(
+                f"✅ Спасибо за покупку NFT {nft[0]}!\n"
+                f"Скоро подарок будет выдан на аккаунт {username}.\n\n"
+                f"⚠️ Если username указан неверно, возврат сделать не получится!"
+            )
+    
+    elif item_type == "username":
+        user_id_bought = parts[1]
+        shuza_username = parts[2]
+        cursor.execute("SELECT username FROM usernames WHERE id = ?", (user_id_bought,))
+        user_data = cursor.fetchone()
+        if user_data:
+            cursor.execute(
+                "INSERT INTO purchases (user_id, username, item_type, item_name) VALUES (?, ?, ?, ?)",
+                (user_id, shuza_username, "username", user_data[0])
+            )
+            await message.answer(
+                f"✅ Спасибо за покупку username @{user_data[0]}!\n"
+                f"Username будет выдан на аккаунт {shuza_username}.\n\n"
+                f"⚠️ Если username указан неверно, возврат сделать не получится!"
+            )
+    
+    conn.commit()
+
+# Админ панель
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel_handler(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "👑 Админ панель:",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+@dp.callback_query(F.data == "toggle_bot")
+async def toggle_bot_handler(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    cursor.execute("SELECT is_active FROM bot_status WHERE id = 1")
+    current_status = cursor.fetchone()[0]
+    new_status = 0 if current_status == 1 else 1
+    cursor.execute("UPDATE bot_status SET is_active = ? WHERE id = 1", (new_status,))
+    conn.commit()
+    
+    status_text = "включен" if new_status == 1 else "выключен"
+    await callback.message.edit_text(
+        f"🔴 Бот {status_text} для обычных пользователей.",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "view_purchases")
+async def view_purchases_handler(callback: types.CallbackQuery, page=0):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    limit = 10
+    offset = page * limit
+    
+    cursor.execute("SELECT COUNT(*) FROM purchases")
+    total = cursor.fetchone()[0]
+    
+    cursor.execute(
+        "SELECT id, user_id, username, item_type, item_name, amount, status FROM purchases LIMIT ? OFFSET ?",
+        (limit, offset)
+    )
+    purchases = cursor.fetchall()
+    
+    if not purchases:
+        await callback.message.edit_text(
+            "📊 Нет покупок.",
+            reply_markup=get_admin_keyboard()
+        )
+        return
+    
+    text = "📊 <b>Список покупок:</b>\n\n"
+    for purchase in purchases:
+        text += f"ID: {purchase[0]}\n"
+        text += f"Пользователь: {purchase[1]}\n"
+        text += f"Username: {purchase[2]}\n"
+        text += f"Тип: {purchase[3]}\n"
+        text += f"Товар: {purchase[4]}\n"
+        if purchase[5]:
+            text += f"Количество: {purchase[5]}\n"
+        text += f"Статус: {purchase[6]}\n"
+        text += "➖➖➖➖➖➖➖➖\n"
+    
+    # Пагинация
+    keyboard = []
+    nav_buttons = []
+    
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=f"purchases_page_{page-1}"
+        ))
+    
+    if (page + 1) * limit < total:
+        nav_buttons.append(InlineKeyboardButton(
+            text="Вперед ➡️",
+            callback_data=f"purchases_page_{page+1}"
+        ))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("purchases_page_"))
+async def purchases_page_handler(callback: types.CallbackQuery):
+    page = int(callback.data.split("_")[2])
+    await view_purchases_handler(callback, page)
+
+@dp.callback_query(F.data == "add_nft")
+async def add_nft_handler(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    await state.set_state(ShopStates.waiting_for_nft_add_name)
+    await callback.message.edit_text("📝 Введите название NFT:")
+    await callback.answer()
+
+@dp.message(ShopStates.waiting_for_nft_add_name)
+async def process_nft_name(message: types.Message, state: FSMContext):
+    await state.update_data(nft_name=message.text)
+    await state.set_state(ShopStates.waiting_for_nft_add_number)
+    await message.answer("📝 Введите номер NFT:")
+
+@dp.message(ShopStates.waiting_for_nft_add_number)
+async def process_nft_number(message: types.Message, state: FSMContext):
+    await state.update_data(nft_number=message.text)
+    await state.set_state(ShopStates.waiting_for_nft_add_price)
+    await message.answer("💰 Введите стоимость NFT в звездах:")
+
+@dp.message(ShopStates.waiting_for_nft_add_price)
+async def process_nft_price(message: types.Message, state: FSMContext):
+    try:
+price = int(message.text)
+        data = await state.get_data()
+        
+        cursor.execute(
+            "INSERT INTO nfts (name, number, price) VALUES (?, ?, ?)",
+            (data['nft_name'], data['nft_number'], price)
+        )
+        conn.commit()
+        
+        await message.answer(
+            f"✅ NFT успешно добавлен!\n"
+            f"Название: {data['nft_name']}\n"
+            f"Номер: {data['nft_number']}\n"
+            f"Цена: {price} ⭐️",
+            reply_markup=get_admin_keyboard()
+        )
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число!")
+
+@dp.callback_query(F.data == "add_username")
+async def add_username_handler(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    await state.set_state(ShopStates.waiting_for_username_add)
+    await callback.message.edit_text("📝 Введите username для продажи (без @):")
+    await callback.answer()
+
+@dp.message(ShopStates.waiting_for_username_add)
+async def process_username_add(message: types.Message, state: FSMContext):
+    await state.update_data(username_to_add=message.text)
+    await state.set_state(ShopStates.waiting_for_username_price)
+    await message.answer("💰 Введите стоимость username в звездах:")
+
+@dp.message(ShopStates.waiting_for_username_price)
+async def process_username_price(message: types.Message, state: FSMContext):
+    try:
+        price = int(message.text)
+        data = await state.get_data()
+        
+        cursor.execute(
+            "INSERT INTO usernames (username, price) VALUES (?, ?)",
+            (data['username_to_add'], price)
+        )
+        conn.commit()
+        
+        await message.answer(
+            f"✅ Username успешно добавлен!\n"
+            f"Username: @{data['username_to_add']}\n"
+            f"Цена: {price} ⭐️",
+            reply_markup=get_admin_keyboard()
+        )
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите число!")
+
+@dp.callback_query(F.data == "add_admin")
+async def add_admin_handler(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    await state.set_state(ShopStates.waiting_for_admin_add)
+    await callback.message.edit_text(
+        "📝 Введите ID пользователя для добавления в админы.\n"
+        "ID можно узнать в боте @userinfo3bot"
+    )
+    await callback.answer()
+
+@dp.message(ShopStates.waiting_for_admin_add)
+async def process_admin_add(message: types.Message, state: FSMContext):
+    try:
+        new_admin_id = int(message.text)
+        cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (new_admin_id,))
+        conn.commit()
+        
+        await message.answer(
+            f"✅ Пользователь {new_admin_id} добавлен в админы!",
+            reply_markup=get_admin_keyboard()
+        )
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите корректный ID!")
+
+@dp.callback_query(F.data == "remove_admin")
+async def remove_admin_handler(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    cursor.execute("SELECT user_id FROM admins")
+    admins = cursor.fetchall()
+    
+    if len(admins) <= 1:
+        await callback.answer("Нет других админов для удаления!", show_alert=True)
+        return
+    
+    keyboard = []
+    for admin in admins:
+        if admin[0] != callback.from_user.id:  # Не показываем себя
+            keyboard.append([InlineKeyboardButton(
+                text=f"ID: {admin[0]}",
+                callback_data=f"confirm_remove_admin_{admin[0]}"
+            )])
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+    
+    await callback.message.edit_text(
+        "Выберите админа для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+@dp.callback_query(F.data.startswith("confirm_remove_admin_"))
+async def confirm_remove_admin(callback: types.CallbackQuery):
+    admin_id = int(callback.data.split("_")[3])
+    
+    cursor.execute("DELETE FROM admins WHERE user_id = ?", (admin_id,))
+    conn.commit()
+    
+    await callback.message.edit_text(
+        f"✅ Админ {admin_id} удален!",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "remove_nft")
+async def remove_nft_handler(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    cursor.execute("SELECT id, name, number FROM nfts")
+    nfts = cursor.fetchall()
+    
+    if not nfts:
+        await callback.answer("Нет NFT для удаления!", show_alert=True)
+        return
+    
+    keyboard = []
+    for nft in nfts:
+        keyboard.append([InlineKeyboardButton(
+            text=f"{nft[1]} #{nft[2]}",
+            callback_data=f"confirm_remove_nft_{nft[0]}"
+        )])
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+    
+    await callback.message.edit_text(
+        "Выберите NFT для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_remove_nft_"))
+async def confirm_remove_nft(callback: types.CallbackQuery):
+    nft_id = int(callback.data.split("_")[3])
+    
+    cursor.execute("DELETE FROM nfts WHERE id = ?", (nft_id,))
+    conn.commit()
+    
+    await callback.message.edit_text(
+        "✅ NFT удален из продажи!",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "remove_username")
+async def remove_username_handler(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    
+    cursor.execute("SELECT id, username FROM usernames")
+    usernames = cursor.fetchall()
+    
+    if not usernames:
+        await callback.answer("Нет username для удаления!", show_alert=True)
+        return
+    
+    keyboard = []
+    for user in usernames:
+        keyboard.append([InlineKeyboardButton(
+            text=f"@{user[1]}",
+            callback_data=f"confirm_remove_username_{user[0]}"
+        )])
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_panel")])
+    
+    await callback.message.edit_text(
+        "Выберите username для удаления:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_remove_username_"))
+async def confirm_remove_username(callback: types.CallbackQuery):
+    user_id = int(callback.data.split("_")[3])
+    
+    cursor.execute("DELETE FROM usernames WHERE id = ?", (user_id,))
+    conn.commit()
+    
+    await callback.message.edit_text(
+        "✅ Username удален из продажи!",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+
+# Запуск бота
 async def main():
-    application = ApplicationBuilder().token("8412822055:AAFyWlyesVN2gDfxVe7ekfegd36P_y9tx3w").build()
+    await dp.start_polling(bot)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(shop, pattern='shop'))
-    application.add_handler(CallbackQueryHandler(admin_panel, pattern='admin_panel'))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
-    application.add_handler(CallbackQueryHandler(handle_admin_queries))
-
-    # Запускаем бота
-    await application.run_polling()
-
-# Здесь вызываем главную функцию
-if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())  # Запускаем основную функцию
+if name == 'main':
+    asyncio.run(main())
