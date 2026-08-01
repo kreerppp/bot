@@ -1,5 +1,9 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+import logging
+
+# Убедитесь, что вы настроили ведение журналов
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # Словари для хранения данных
 admins = set()  # Хранит ID администраторов
@@ -8,9 +12,9 @@ nfts = {}  # Хранит NFT
 users = {}  # Хранит юзеры и их стоимость
 paused = False  # Статус паузы
 
-def start(update: Update, context: CallbackContext) -> None:
+async def start(update: Update, context) -> None:
     if paused:
-        update.message.reply_text('Бот приостановлен администрацией.')
+        await update.message.reply_text('Бот приостановлен администрацией.')
         return
 
     keyboard = [
@@ -20,9 +24,9 @@ def start(update: Update, context: CallbackContext) -> None:
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text('Это неофициальный бот по покупке звезд и НФТ.', reply_markup=reply_markup)
+    await update.message.reply_text('Это неофициальный бот по покупке звезд и НФТ.', reply_markup=reply_markup)
 
-def shop(update: Update, context: CallbackContext) -> None:
+async def shop(update: Update, context) -> None:
     keyboard = [
         [InlineKeyboardButton("Звезды", callback_data='buy_stars')],
         [InlineKeyboardButton("NFT", callback_data='buy_nft')],
@@ -30,23 +34,23 @@ def shop(update: Update, context: CallbackContext) -> None:
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.callback_query.edit_message_text(text='Выберите категорию:', reply_markup=reply_markup)
+    await update.callback_query.edit_message_text(text='Выберите категорию:', reply_markup=reply_markup)
 
 # Функция для обработки получения количества звезд
-def buy_stars(update: Update, context: CallbackContext) -> None:
-    update.callback_query.edit_message_text(text='Напишите свой юз в shuzagram:')
+async def buy_stars(update: Update, context) -> None:
+    await update.callback_query.edit_message_text(text='Напишите свой юз в shuzagram:')
     context.user_data['buying'] = 'stars'
 
-def handle_username(update: Update, context: CallbackContext):
+async def handle_username(update: Update, context) -> None:
     username = update.message.text
     if 'buying' in context.user_data:
         buying_type = context.user_data['buying']
         if buying_type == 'stars':
-            update.message.reply_text('Сколько звезд вы хотите купить? (например, 1000)')
+            await update.message.reply_text('Сколько звезд вы хотите купить? (например, 1000)')
             context.user_data['username'] = username
         # Далее добавьте обработку для NFT и юзов аналогично...
 
-def admin_panel(update: Update, context: CallbackContext) -> None:
+async def admin_panel(update: Update, context) -> None:
     if update.message.from_user.id in admins:
         keyboard = [
             [InlineKeyboardButton("Выключить бота", callback_data='pause_bot')],
@@ -60,32 +64,31 @@ def admin_panel(update: Update, context: CallbackContext) -> None:
         ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        update.message.reply_text('Админ панель:', reply_markup=reply_markup)
+        await update.message.reply_text('Админ панель:', reply_markup=reply_markup)
 
-def handle_admin_queries(update: Update, context: CallbackContext) -> None:
+async def handle_admin_queries(update: Update, context) -> None:
     callback_data = update.callback_query.data
     if callback_data == 'pause_bot':
         global paused
         paused = True
-        update.callback_query.edit_message_text("Бот выключен для обычных пользователей.")
+        await update.callback_query.edit_message_text("Бот выключен для обычных пользователей.")
     elif callback_data == 'view_purchases':
-        update.callback_query.edit_message_text("\n".join(purchases) if purchases else "Нет покупок.")
+        await update.callback_query.edit_message_text("\n".join(purchases) if purchases else "Нет покупок.")
     # Добавьте обработку других admin функций...
 
-def main():
-    updater = Updater("8412822055:AAFyWlyesVN2gDfxVe7ekfegd36P_y9tx3w")
-    dispatcher = updater.dispatcher
+async def main():
+    application = ApplicationBuilder().token("8412822055:AAFyWlyesVN2gDfxVe7ekfegd36P_y9tx3w").build()
 
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CallbackQueryHandler(shop, pattern='shop'))
-    dispatcher.add_handler(CallbackQueryHandler(admin_panel, pattern='admin_panel'))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_username))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(shop, pattern='shop'))
+    application.add_handler(CallbackQueryHandler(admin_panel, pattern='admin_panel'))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_username))
 
     # Обработчики для админ функций
-    dispatcher.add_handler(CallbackQueryHandler(handle_admin_queries))
+    application.add_handler(CallbackQueryHandler(handle_admin_queries))
 
-    updater.start_polling()
-    updater.idle()
+    await application.run_polling()
 
 if __name__ == '__main__':
-    main()
+    import asyncio
+    asyncio.run(main())
