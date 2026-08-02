@@ -162,7 +162,7 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         "👋 Добро пожаловать в shuzashop!\n\n"
-        "Это не официальный бот по покупке звезд, анона и т.д.\n\n"
+        "Это не официальный бот по покупке звезд, нфт и т.д.\n\n"
         "Выберите действие:",
         reply_markup=get_main_keyboard(user_id)
     )
@@ -192,7 +192,7 @@ async def support_handler(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "🆘 <b>Поддержка</b>\n\n"
         "По всем вопросам обращайтесь:\n"
-        "@support_username",
+        "@kreerppp1",
         reply_markup=get_main_keyboard(callback.from_user.id)
     )
     await callback.answer()
