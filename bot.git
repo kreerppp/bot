@@ -219,8 +219,7 @@ async def process_stars_username(message: types.Message, state: FSMContext):
     await state.update_data(username=message.text)
     await state.set_state(ShopStates.waiting_for_stars_amount)
     await message.answer(
-        "💰 Сколько звезд вы хотите купить?",
-        reply_markup=get_stars_keyboard()
+        "💰 Сколько звезд вы хотите купить? (Цена в TG звездах)"
     )
 
 @dp.callback_query(F.data.startswith("stars_"))
@@ -228,10 +227,10 @@ async def process_stars_amount(callback: types.CallbackQuery, state: FSMContext)
     data = await state.get_data()
     username = data.get('username')
     amount = int(callback.data.split("_")[1])
-    price = amount // 100  # Цена в Telegram Stars
-    
+    price = amount // 10  # цена в TG звездах, например, 10 TG звезд за 1 звезду
+
     await state.clear()
-    
+
     # Отправка счета
     await bot.send_invoice(
         chat_id=callback.from_user.id,
@@ -250,19 +249,19 @@ async def process_stars_amount(callback: types.CallbackQuery, state: FSMContext)
 async def nft_handler(callback: types.CallbackQuery, state: FSMContext):
     cursor.execute("SELECT id, name, number, price FROM nfts")
     nfts = cursor.fetchall()
-    
+
     if not nfts:
         await callback.answer("Нет доступных NFT", show_alert=True)
         return
-    
+
     keyboard = []
     for nft in nfts:
         keyboard.append([InlineKeyboardButton(
-            text=f"{nft[1]} #{nft[2]} - {nft[3]} ⭐️",
+            text=f"{nft[1]} #{nft[2]} - {nft[3]} шиза⭐️",
             callback_data=f"select_nft_{nft[0]}"
         )])
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="shop")])
-    
+
     await state.set_state(ShopStates.waiting_for_nft_selection)
     await callback.message.edit_text(
         "🎨 Выберите NFT:",
@@ -275,12 +274,12 @@ async def select_nft_handler(callback: types.CallbackQuery, state: FSMContext):
     nft_id = int(callback.data.split("_")[2])
     cursor.execute("SELECT name, price FROM nfts WHERE id = ?", (nft_id,))
     nft = cursor.fetchone()
-    
+
     if nft:
         await state.update_data(nft_id=nft_id, nft_name=nft[0], nft_price=nft[1])
         await state.set_state(ShopStates.waiting_for_nft_username)
         await callback.message.edit_text(
-            "📝 Введите ваш username в shuzagram:"
+            "📝 Введите ваш username в шизаграм: (или введи владельца NFT)"
         )
     await callback.answer()
 
@@ -288,13 +287,14 @@ async def select_nft_handler(callback: types.CallbackQuery, state: FSMContext):
 async def process_nft_username(message: types.Message, state: FSMContext):
     data = await state.get_data()
     username = message.text
-    
+
+    # Используйте шиза звезды как валюту
     await bot.send_invoice(
         chat_id=message.from_user.id,
         title=f"NFT: {data['nft_name']}",
         description=f"Покупка NFT {data['nft_name']} для пользователя {username}",
         payload=f"nft_{data['nft_id']}_{username}",
-        provider_token="",
+        provider_token="",  # Здесь может быть добавлен токен
         currency="XTR",
         prices=[LabeledPrice(label=f"NFT {data['nft_name']}", amount=data['nft_price'])]
     )
@@ -305,29 +305,29 @@ async def process_nft_username(message: types.Message, state: FSMContext):
 async def username_handler(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ShopStates.waiting_for_username_purchase)
     await callback.message.edit_text(
-        "📝 Введите ваш username в shuzagram:"
+        "📝 Введите ваш username в шизаграм: (или введи владельца юза)"
     )
     await callback.answer()
 
 @dp.message(ShopStates.waiting_for_username_purchase)
 async def process_username_purchase(message: types.Message, state: FSMContext):
     await state.update_data(shuza_username=message.text)
-    
+
     cursor.execute("SELECT id, username, price FROM usernames")
     usernames = cursor.fetchall()
-    
+
     if not usernames:
         await message.answer("Нет доступных username")
         return
-    
+
     keyboard = []
     for user in usernames:
         keyboard.append([InlineKeyboardButton(
-            text=f"@{user[1]} - {user[2]} ⭐️",
+            text=f"@{user[1]} - {user[2]} шиза⭐️",
             callback_data=f"select_username_{user[0]}"
         )])
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="shop")])
-    
+
     await state.set_state(ShopStates.waiting_for_username_selection)
     await message.answer(
         "👤 Выберите username:",
@@ -341,14 +341,14 @@ async def select_username_handler(callback: types.CallbackQuery, state: FSMConte
     user_data = cursor.fetchone()
     data = await state.get_data()
     shuza_username = data.get('shuza_username')
-    
+
     if user_data:
         await bot.send_invoice(
             chat_id=callback.from_user.id,
             title=f"Username: @{user_data[0]}",
             description=f"Покупка username @{user_data[0]} для пользователя {shuza_username}",
             payload=f"username_{user_id}_{shuza_username}",
-            provider_token="",
+            provider_token="",  # Добавьте токен
             currency="XTR",
             prices=[LabeledPrice(label=f"Username @{user_data[0]}", amount=user_data[1])]
         )
@@ -356,24 +356,21 @@ async def select_username_handler(callback: types.CallbackQuery, state: FSMConte
     await callback.message.delete()
     await callback.answer()
 
-# Обработка платежей
-@dp.pre_checkout_query()
-async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
+# Обработчик успешного платежа (не забывайте изменить обработку для шиза звезд)
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: types.Message):
     payment = message.successful_payment
     payload = payment.invoice_payload
     user_id = message.from_user.id
-    
+
     # Парсинг payload
     parts = payload.split("_")
     item_type = parts[0]
-    
+
     if item_type == "stars":
         amount = parts[1]
         username = parts[2]
+        # Обработка транзакции с TG звездами
         cursor.execute(
             "INSERT INTO purchases (user_id, username, item_type, item_name, amount) VALUES (?, ?, ?, ?, ?)",
             (user_id, username, "stars", f"{amount} звезд", int(amount))
@@ -383,7 +380,7 @@ async def process_successful_payment(message: types.Message):
             f"Ожидайте выдачи {amount} звезд на аккаунт {username}.\n\n"
             f"⚠️ Если username был указан неправильно, возврат средств не производится!"
         )
-    
+
     elif item_type == "nft":
         nft_id = parts[1]
         username = parts[2]
@@ -399,7 +396,7 @@ async def process_successful_payment(message: types.Message):
                 f"Скоро подарок будет выдан на аккаунт {username}.\n\n"
                 f"⚠️ Если username указан неверно, возврат сделать не получится!"
             )
-    
+
     elif item_type == "username":
         user_id_bought = parts[1]
         shuza_username = parts[2]
@@ -415,7 +412,7 @@ async def process_successful_payment(message: types.Message):
                 f"Username будет выдан на аккаунт {shuza_username}.\n\n"
                 f"⚠️ Если username указан неверно, возврат сделать не получится!"
             )
-    
+
     conn.commit()
 
 # Админ панель
