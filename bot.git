@@ -14,7 +14,7 @@ import json
 logging.basicConfig(level=logging.INFO)
 
 # Инициализация бота
-API_TOKEN = '8412822055:AAFyWlyesVN2gDfxVe7ekfegd36P_y9tx3w'  # Замените на токен вашего бота
+API_TOKEN = '8412822055:AAEtKRwKuPEY0g4BANy3M_uuT3EKzRWq6Hc'  # Замените на токен вашего бота
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS bot_status (
 cursor.execute("INSERT OR IGNORE INTO bot_status (id, is_active) VALUES (1, 1)")
 
 # Добавление начального админа (замените на свой ID)
-cursor.execute("INSERT OR IGNORE INTO admins (8987243077) VALUES (?)", (8987243077,))
+cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (8987243077,))
 
 conn.commit()
 
@@ -127,6 +127,7 @@ def get_shop_keyboard():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 def get_admin_keyboard():
     keyboard = [
         [InlineKeyboardButton(text="🔴 Выключить бота", callback_data="toggle_bot")],
@@ -159,20 +160,12 @@ async def cmd_start(message: types.Message):
         await message.answer("🔴 Бот приостановлен администрацией.")
         return
     
-    if is_admin(user_id):
-        await message.answer(
-            "👋 Добро пожаловать в shuzashop!\n\n"
-            "Это не официальный бот по покупке звезд, анона и т.д.\n\n"
-            "Выберите действие:",
-            reply_markup=get_main_keyboard(user_id)
-        )
-    else:
-        await message.answer(
-            "👋 Добро пожаловать в shuzashop!\n\n"
-            "Это не официальный бот по покупке звезд, анона и т.д.\n\n"
-            "Выберите действие:",
-            reply_markup=get_main_keyboard(user_id)
-        )
+    await message.answer(
+        "👋 Добро пожаловать в shuzashop!\n\n"
+        "Это не официальный бот по покупке звезд, анона и т.д.\n\n"
+        "Выберите действие:",
+        reply_markup=get_main_keyboard(user_id)
+    )
 
 # Обработчики callback
 @dp.callback_query(F.data == "shop")
@@ -229,6 +222,7 @@ async def process_stars_username(message: types.Message, state: FSMContext):
         "💰 Сколько звезд вы хотите купить?",
         reply_markup=get_stars_keyboard()
     )
+
 @dp.callback_query(F.data.startswith("stars_"))
 async def process_stars_amount(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -339,6 +333,7 @@ async def process_username_purchase(message: types.Message, state: FSMContext):
         "👤 Выберите username:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
+
 @dp.callback_query(F.data.startswith("select_username_"))
 async def select_username_handler(callback: types.CallbackQuery, state: FSMContext):
     user_id = int(callback.data.split("_")[2])
@@ -435,6 +430,7 @@ async def admin_panel_handler(callback: types.CallbackQuery):
         reply_markup=get_admin_keyboard()
     )
     await callback.answer()
+
 @dp.callback_query(F.data == "toggle_bot")
 async def toggle_bot_handler(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -545,7 +541,7 @@ async def process_nft_number(message: types.Message, state: FSMContext):
 @dp.message(ShopStates.waiting_for_nft_add_price)
 async def process_nft_price(message: types.Message, state: FSMContext):
     try:
-price = int(message.text)
+        price = int(message.text)
         data = await state.get_data()
         
         cursor.execute(
@@ -750,5 +746,5 @@ async def confirm_remove_username(callback: types.CallbackQuery):
 async def main():
     await dp.start_polling(bot)
 
-if __name__ == '__main__':
+if name == 'main':
     asyncio.run(main())
