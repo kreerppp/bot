@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS bot_status (
 cursor.execute("INSERT OR IGNORE INTO bot_status (id, is_active) VALUES (1, 1)")
 
 # Добавление начального админа (замените на свой ID)
-cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (8987243077,))
+cursor.execute("INSERT OR IGNORE INTO admins (8987243077) VALUES (?)", (8987243077,))
 
 conn.commit()
 
