@@ -144,9 +144,9 @@ def get_admin_keyboard():
 
 def get_stars_keyboard():
     keyboard = [
-        [InlineKeyboardButton(text="1000 звезд = 10 ⭐️", callback_data="stars_1000")],
-        [InlineKeyboardButton(text="5000 звезд = 50 ⭐️", callback_data="stars_5000")],
-        [InlineKeyboardButton(text="10000 звезд = 100 ⭐️", callback_data="stars_10000")],
+        [InlineKeyboardButton(text="1000 звезд = 7 ⭐️", callback_data="stars_1000")],
+        [InlineKeyboardButton(text="5000 звезд = 30 ⭐️", callback_data="stars_5000")],
+        [InlineKeyboardButton(text="10000 звезд = 50 ⭐️", callback_data="stars_10000")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="shop")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
