@@ -133,7 +133,7 @@ def update_subscription(user_id, subscription_type, days):
     cursor = conn.cursor()
     
     end_date = None
-    if subscription_type != "навсегда":
+    if subscription_type != "навсегда" and subscription_type is not None:
         end_date = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
     
     cursor.execute('''
@@ -330,20 +330,8 @@ async def process_payment(callback: CallbackQuery):
     
     choice = prices[callback.data]
     
-    # Создаем инвойс для оплаты звездами
-    await callback.message.answer(
-        f"💫 Оплатите {choice['stars']} звезд для получения ключа на {choice['text']}.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text=f"⭐ Оплатить {choice['stars']} звезд",
-                pay=True
-            )]
-        ])
-    )
-    
-    # В реальном боте здесь был бы процесс оплаты через Telegram Stars
-    # Для демонстрации сразу выдаем ключ
-    await callback.answer(f"Оплата на {choice['text']}...", show_alert=True)
+    # Сначала отвечаем на callback, чтобы убрать загрузку
+    await callback.answer(f"⏳ Обработка запроса на {choice['text']}...")
     
     # Выдаем ключ
     key = get_key()
@@ -354,12 +342,14 @@ async def process_payment(callback: CallbackQuery):
     # Добавляем новый ключ для пополнения базы
     add_new_key()
     
-    await callback.message.answer(
+    # Отправляем сообщение с ключом
+    await callback.message.edit_text(
         f"✅ Спасибо за покупку!\n"
         f"🔑 Ваш ключ на {choice['text']}:\n"
         f"<code>{key}</code>\n\n"
         f"Сохраните его, он больше не будет показан.",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=get_main_keyboard()
     )
 
 @dp.callback_query(lambda c: c.data == "profile")
