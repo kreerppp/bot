@@ -431,7 +431,7 @@ async def show_profile(callback: CallbackQuery):
                 profile_text += f"⏳ Ошибка формата даты\n"
     
     if user_key:
-        profile_text += f"\n🔑 Ваш ключ:\n<code>{user_key}</code>\n"
+        profile_text += f"\n🔑 Ваш ключ:можно узнать у @kreerppp1"
     
     await callback.message.edit_text(profile_text, parse_mode="HTML", reply_markup=get_main_keyboard())
     await callback.answer()
