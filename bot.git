@@ -27,6 +27,8 @@ class AdminStates(StatesGroup):
     selecting_key_duration = State()
     waiting_for_custom_duration = State()
     waiting_for_duration_value = State()
+    waiting_for_mailing_text = State()
+    waiting_for_mailing_confirm = State()
 
 # Подключение к базе данных SQLite
 def init_db():
@@ -171,7 +173,7 @@ def get_all_users():
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
     
-    cursor.execute('SELECT user_id, username, first_name, subscription_type, subscription_end FROM users WHERE is_banned = FALSE')
+    cursor.execute('SELECT user_id, username, first_name FROM users WHERE is_banned = FALSE')
     users = cursor.fetchall()
     
     conn.close()
@@ -222,6 +224,7 @@ def get_main_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Купить ключ", callback_data="buy_key")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="📥 Скачать программу", callback_data="download")],
         [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")]
     ])
     return keyboard
@@ -243,7 +246,8 @@ def get_admin_keyboard():
         [InlineKeyboardButton(text="✅ Разбанить пользователя", callback_data="admin_unban_user")],
         [InlineKeyboardButton(text="📋 Список пользователей", callback_data="admin_list_users")],
         [InlineKeyboardButton(text="⛔ Список забаненных", callback_data="admin_list_banned")],
-        [InlineKeyboardButton(text="🌟 Список с подпиской", callback_data="admin_list_subscribed")]
+        [InlineKeyboardButton(text="🌟 Список с подпиской", callback_data="admin_list_subscribed")],
+        [InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_mailing")]
     ])
     return keyboard
 
@@ -343,9 +347,9 @@ async def process_payment(callback: CallbackQuery):
             return
     
     prices = {
-        "week": {"stars": 50, "text": "неделю", "days": 7},
-        "month": {"stars": 100, "text": "месяц", "days": 30},
-        "forever": {"stars": 200, "text": "навсегда", "days": 9999}
+        "week": {"stars": 50, "text": "неделю"},
+        "month": {"stars": 100, "text": "месяц"},
+        "forever": {"stars": 200, "text": "навсегда"}
     }
     
     choice = prices[callback.data]
@@ -353,17 +357,33 @@ async def process_payment(callback: CallbackQuery):
     # Сразу отвечаем на callback, чтобы убрать загрузку
     await callback.answer()
     
-    # Показываем контакт для покупки (БЕЗ автоматической выдачи ключа)
+    # Показываем контакт для покупки
     await callback.message.edit_text(
         f"💫 Для покупки ключа на {choice['text']} (стоимость: {choice['stars']} ⭐️)\n\n"
         f"📩 Напишите @kreerppp1 для оформления.\n\n"
-        f"После оплаты вы получите ключ для активации программы Crazy Info.\n\n"
-        f"💰 Цена:\n"
-        f"• На неделю: 50 ⭐\n"
-        f"• На месяц: 100 ⭐\n"
-        f"• Навсегда: 200 ⭐",
+        f"После оплаты вы получите ключ для активации программы Crazy Info.",
         reply_markup=get_main_keyboard()
     )
+
+@dp.callback_query(lambda c: c.data == "download")
+async def download_program(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # Проверка на бан
+    user = get_user(user_id)
+    if user:
+        if user[6]:  # is_banned
+            await callback.answer("⛔ Вы забанены!", show_alert=True)
+            return
+    
+    await callback.message.edit_text(
+        "📥 Скачать программу Crazy Info\n\n"
+        "Перейдите по ссылке для скачивания:\n"
+        "https://drive.google.com/drive/folders/160jQaSGYf-9NKjQx4bVnfBBztGc_5EIK?usp=sharing\n\n"
+        "🔑 Не забудьте активировать программу своим ключом!",
+        reply_markup=get_main_keyboard()
+    )
+    await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "profile")
 async def show_profile(callback: CallbackQuery):
@@ -423,6 +443,7 @@ async def about_bot(callback: CallbackQuery):
         "Этот бот создан для покупки ключей доступа к программе Crazy Info.\n"
         "Вы можете приобрести подписку на неделю, месяц или навсегда.\n"
         "После оплаты вы получите уникальный ключ для активации программы.\n\n"
+        "📥 Программу можно скачать по кнопке 'Скачать программу'\n\n"
         "По всем вопросам обращайтесь к администратору.",
         reply_markup=get_main_keyboard()
     )
@@ -762,21 +783,9 @@ async def admin_list_users(callback: CallbackQuery):
     
     text = "📋 Список пользователей:\n\n"
     for user in users[:20]:
-        user_id, username, first_name, sub_type, sub_end = user
+        user_id, username, first_name = user
         display_name = f"{first_name} (@{username})" if username else f"{first_name}"
         text += f"🆔 {user_id}: {display_name}\n"
-        text += f"   📋 Подписка: {sub_type or 'Нет'}\n"
-        if sub_end and sub_type != "навсегда":
-            try:
-                end_date = datetime.strptime(sub_end, '%Y-%m-%d %H:%M:%S.%f')
-                if end_date > datetime.now():
-                    text += f"   ⏳ До: {end_date.strftime('%Y-%m-%d %H:%M')}\n"
-                else:
-                    text += f"   ⏳ Истекла\n"
-            except:
-                text += f"   ⏳ До: {sub_end}\n"
-        elif sub_type == "навсегда":
-            text += f"   ⏳ Навсегда\n"
         text += "\n"
     
     if len(users) > 20:
@@ -849,9 +858,118 @@ async def admin_list_subscribed(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=get_admin_keyboard())
     await callback.answer()
 
+# Рассылка
+@dp.callback_query(lambda c: c.data == "admin_mailing")
+async def admin_mailing(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    await callback.message.edit_text(
+        "📨 Рассылка\n\n"
+        "Отправьте текст сообщения для рассылки всем пользователям бота.\n"
+        "Можно использовать HTML разметку.\n\n"
+        "❌ Чтобы отменить, отправьте /cancel"
+    )
+    await state.set_state(AdminStates.waiting_for_mailing_text)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_mailing_text)
+async def process_mailing_text(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Рассылка отменена.")
+        return
+    
+    # Сохраняем текст рассылки
+    await state.update_data(mailing_text=message.text, mailing_parse_mode="HTML")
+    
+    # Получаем всех пользователей
+    users = get_all_users()
+    total_users = len(users)
+    
+    # Создаем клавиатуру подтверждения
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить всем", callback_data="mailing_confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_admin")]
+    ])
+    
+    await message.answer(
+        f"📨 Предпросмотр рассылки:\n\n"
+        f"{message.text}\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📊 Будет отправлено: {total_users} пользователям\n\n"
+        f"Подтвердите отправку:",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await state.set_state(AdminStates.waiting_for_mailing_confirm)
+
+@dp.callback_query(lambda c: c.data == "mailing_confirm")
+async def mailing_confirm(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    data = await state.get_data()
+    text = data.get('mailing_text')
+    parse_mode = data.get('mailing_parse_mode', 'HTML')
+    
+    # Получаем всех пользователей
+    users = get_all_users()
+    total_users = len(users)
+    sent = 0
+    failed = 0
+    
+    # Отправляем сообщение админу о начале рассылки
+    await callback.message.edit_text(
+        f"📨 Начинаю рассылку...\n"
+        f"Всего пользователей: {total_users}"
+    )
+    
+    # Отправляем сообщение каждому пользователю
+    for user in users:
+        user_id = user[0]
+        try:
+            await bot.send_message(user_id, text, parse_mode=parse_mode)
+            sent += 1
+        except:
+            failed += 1
+        
+        # Небольшая задержка, чтобы не превысить лимиты Telegram
+        await asyncio.sleep(0.05)
+    
+    # Удаляем состояние
+    await state.clear()
+    
+    # Итоговое сообщение
+    await callback.message.edit_text(
+        f"✅ Рассылка завершена!\n\n"
+        f"📊 Статистика:\n"
+        f"• Отправлено: {sent}\n"
+        f"• Не доставлено: {failed}\n"
+        f"• Всего: {total_users}",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+
 @dp.callback_query(lambda c: c.data == "noop")
 async def noop(callback: CallbackQuery):
     await callback.answer()
+
+# Команда отмены
+@dp.message(Command("cancel"))
+async def cancel_command(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("❌ Нет активных действий для отмены.")
+        return
+    
+    await state.clear()
+    await message.answer("✅ Действие отменено.")
 
 # Запуск бота
 async def main():
@@ -862,6 +980,10 @@ async def main():
     
     print("✅ Бот запущен!")
     print(f"👑 Админ ID: {ADMIN_ID}")
+    print("📌 Команды:")
+    print("  /start - Запуск бота")
+    print("  /adminpanel - Админ-панель")
+    print("  /cancel - Отмена действия")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
