@@ -353,31 +353,15 @@ async def process_payment(callback: CallbackQuery):
     # Сразу отвечаем на callback, чтобы убрать загрузку
     await callback.answer()
     
-    # Получаем ключ для пользователя
-    user_key = get_key()
-    
-    # Вычисляем дату окончания
-    end_datetime = None
-    if choice['text'] != "навсегда":
-        end_datetime = (datetime.now() + timedelta(days=choice['days'])).strftime('%Y-%m-%d %H:%M:%S.%f')
-    
-    subscription_type = f"на {choice['text']}"
-    if choice['text'] == "навсегда":
-        subscription_type = "навсегда"
-    
-    # Сохраняем подписку и ключ в профиль пользователя
-    update_subscription(user_id, subscription_type, end_datetime, user_key)
-    
-    # Добавляем новый ключ для пополнения базы
-    add_new_key()
-    
+    # Показываем контакт для покупки (БЕЗ автоматической выдачи ключа)
     await callback.message.edit_text(
-        f"✅ Спасибо за покупку!\n"
-        f"🔑 Ваш ключ на {choice['text']}:\n"
-        f"<code>{user_key}</code>\n\n"
-        f"Сохраните его, он больше не будет показан.\n"
-        f"Вы всегда можете посмотреть свой ключ в профиле.",
-        parse_mode="HTML",
+        f"💫 Для покупки ключа на {choice['text']} (стоимость: {choice['stars']} ⭐️)\n\n"
+        f"📩 Напишите @kreerppp1 для оформления.\n\n"
+        f"После оплаты вы получите ключ для активации программы Crazy Info.\n\n"
+        f"💰 Цена:\n"
+        f"• На неделю: 50 ⭐\n"
+        f"• На месяц: 100 ⭐\n"
+        f"• Навсегда: 200 ⭐",
         reply_markup=get_main_keyboard()
     )
 
