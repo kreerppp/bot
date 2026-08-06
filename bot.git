@@ -28,11 +28,6 @@ class AdminStates(StatesGroup):
     waiting_for_custom_duration = State()
     waiting_for_duration_value = State()
 
-class UserStates(StatesGroup):
-    creating_password = State()
-    confirming_password = State()
-    entering_password = State()
-
 # Подключение к базе данных SQLite
 def init_db():
     conn = sqlite3.connect('bot_database.db')
@@ -47,7 +42,6 @@ def init_db():
             subscription_type TEXT,
             subscription_end DATETIME,
             user_key TEXT,
-            key_password TEXT,
             is_banned BOOLEAN DEFAULT FALSE,
             registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -173,29 +167,6 @@ def update_subscription(user_id, subscription_type, end_datetime, user_key=None)
     conn.commit()
     conn.close()
 
-def set_key_password(user_id, password):
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        UPDATE users 
-        SET key_password = ?
-        WHERE user_id = ?
-    ''', (password, user_id))
-    
-    conn.commit()
-    conn.close()
-
-def get_user_key(user_id):
-    conn = sqlite3.connect('bot_database.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT user_key, key_password FROM users WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    
-    conn.close()
-    return result
-
 def get_all_users():
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
@@ -255,13 +226,6 @@ def get_main_keyboard():
     ])
     return keyboard
 
-def get_profile_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔑 Показать мой ключ", callback_data="show_my_key")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ])
-    return keyboard
-
 def get_duration_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 На неделю (50 ⭐)", callback_data="week")],
@@ -306,7 +270,7 @@ async def start_command(message: Message):
     # Проверяем, не забанен ли пользователь
     user = get_user(user_id)
     if user:
-        if user[7]:  # is_banned = TRUE (индекс 7)
+        if user[6]:  # is_banned = TRUE (индекс 6)
             await message.answer("⛔ Вы забанены и не можете использовать бота.")
             return
     
@@ -357,7 +321,7 @@ async def buy_key(callback: CallbackQuery):
     user = get_user(user_id)
     
     if user:
-        if user[7]:  # is_banned
+        if user[6]:  # is_banned
             await callback.answer("⛔ Вы забанены!", show_alert=True)
             return
     
@@ -374,7 +338,7 @@ async def process_payment(callback: CallbackQuery):
     # Проверка на бан
     user = get_user(user_id)
     if user:
-        if user[7]:  # is_banned
+        if user[6]:  # is_banned
             await callback.answer("⛔ Вы забанены!", show_alert=True)
             return
     
@@ -412,7 +376,7 @@ async def process_payment(callback: CallbackQuery):
         f"🔑 Ваш ключ на {choice['text']}:\n"
         f"<code>{user_key}</code>\n\n"
         f"Сохраните его, он больше не будет показан.\n"
-        f"Для просмотра ключа в профиле установите пароль.",
+        f"Вы всегда можете посмотреть свой ключ в профиле.",
         parse_mode="HTML",
         reply_markup=get_main_keyboard()
     )
@@ -426,15 +390,14 @@ async def show_profile(callback: CallbackQuery):
         await callback.answer("❌ Пользователь не найден.")
         return
     
-    if user[7]:  # is_banned
+    if user[6]:  # is_banned
         await callback.answer("⛔ Вы забанены!", show_alert=True)
         return
     
     username = user[1] or "Не указан"
     subscription_type = user[3] or "Нет подписки"
     subscription_end = user[4]
-    has_key = user[6] is not None  # user_key
-    has_password = user[7] is not None  # key_password (индекс 7)
+    user_key = user[5]  # user_key
     
     profile_text = f"👤 Профиль\n\n"
     profile_text += f"🆔 ID: {user_id}\n"
@@ -463,179 +426,11 @@ async def show_profile(callback: CallbackQuery):
             except:
                 profile_text += f"⏳ Ошибка формата даты\n"
     
-    if has_key:
-        profile_text += f"\n🔑 Ключ: {('Защищен паролем' if has_password else 'Не защищен паролем')}\n"
+    if user_key:
+        profile_text += f"\n🔑 Ваш ключ:\n<code>{user_key}</code>\n"
     
-    await callback.message.edit_text(profile_text, reply_markup=get_profile_keyboard())
+    await callback.message.edit_text(profile_text, parse_mode="HTML", reply_markup=get_main_keyboard())
     await callback.answer()
-
-@dp.callback_query(lambda c: c.data == "show_my_key")
-async def show_my_key(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    user = get_user(user_id)
-    
-    if not user:
-        await callback.answer("❌ Пользователь не найден.")
-        return
-    
-    if user[7]:  # is_banned
-        await callback.answer("⛔ Вы забанены!", show_alert=True)
-        return
-    
-    if user[6] is None:  # user_key
-        await callback.answer("❌ У вас нет ключа! Купите подписку.", show_alert=True)
-        return
-    
-    # key_password хранится в индексе 7
-    if user[7] is None:  # key_password
-        # Нет пароля - предлагаем создать
-        await callback.message.edit_text(
-            "🔐 У вас еще не установлен пароль для просмотра ключа.\n\n"
-            "Придумайте и отправьте пароль (минимум 4 символа):",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
-            ])
-        )
-        await state.set_state(UserStates.creating_password)
-    else:
-        # Есть пароль - просим ввести
-        await callback.message.edit_text(
-            "🔐 Введите ваш пароль для просмотра ключа:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="profile")]
-            ])
-        )
-        await state.set_state(UserStates.entering_password)
-    
-    await callback.answer()
-
-@dp.message(UserStates.creating_password)
-async def process_create_password(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    password = message.text.strip()
-    
-    if len(password) < 4:
-        await message.answer(
-            "❌ Пароль должен быть минимум 4 символа.\n"
-            "Придумайте другой пароль:"
-        )
-        return
-    
-    # Сохраняем пароль в состояние
-    await state.update_data(password=password)
-    
-    await message.answer(
-        "✅ Пароль установлен!\n\n"
-        "Теперь подтвердите его, введите пароль еще раз для проверки:"
-    )
-    await state.set_state(UserStates.confirming_password)
-
-@dp.message(UserStates.confirming_password)
-async def process_confirm_password(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    confirm_password = message.text.strip()
-    
-    data = await state.get_data()
-    password = data.get('password')
-    
-    if confirm_password != password:
-        await message.answer(
-            "❌ Пароли не совпадают!\n"
-            "Попробуйте снова ввести пароль для подтверждения:"
-        )
-        return
-    
-    # Сохраняем пароль в базу
-    set_key_password(user_id, password)
-    
-    await message.answer(
-        "✅ Пароль успешно создан и подтвержден!\n\n"
-        "Теперь вы можете посмотреть свой ключ."
-    )
-    await state.clear()
-    
-    # Показываем профиль
-    await show_profile_callback(message.from_user.id, message)
-
-@dp.message(UserStates.entering_password)
-async def process_enter_password(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    entered_password = message.text.strip()
-    
-    # Получаем сохраненный пароль
-    user_data = get_user_key(user_id)
-    if not user_data:
-        await message.answer("❌ Ошибка! Попробуйте позже.")
-        await state.clear()
-        return
-    
-    stored_password = user_data[1]
-    user_key = user_data[0]
-    
-    if entered_password == stored_password:
-        # Пароль правильный - показываем ключ
-        await message.answer(
-            f"🔑 Ваш ключ:\n\n"
-            f"<code>{user_key}</code>\n\n"
-            f"⚠️ Сохраните его в надежном месте!",
-            parse_mode="HTML",
-            reply_markup=get_profile_keyboard()
-        )
-        await state.clear()
-    else:
-        # Неправильный пароль
-        await message.answer(
-            "❌ Неправильный пароль!\n\n"
-            f"Попробуйте снова:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="profile")]
-            ])
-        )
-
-async def show_profile_callback(user_id, message):
-    user = get_user(user_id)
-    
-    if not user:
-        await message.answer("❌ Пользователь не найден.")
-        return
-    
-    username = user[1] or "Не указан"
-    subscription_type = user[3] or "Нет подписки"
-    subscription_end = user[4]
-    has_key = user[6] is not None
-    has_password = user[7] is not None
-    
-    profile_text = f"👤 Профиль\n\n"
-    profile_text += f"🆔 ID: {user_id}\n"
-    profile_text += f"👤 Ник: @{username}\n"
-    profile_text += f"📋 Подписка: {subscription_type}\n"
-    
-    if subscription_type and subscription_type != "Нет подписки":
-        if subscription_type == "навсегда":
-            profile_text += f"⏳ Срок: Навсегда\n"
-        elif subscription_end:
-            try:
-                end_date = datetime.strptime(subscription_end, '%Y-%m-%d %H:%M:%S.%f')
-                time_left = end_date - datetime.now()
-                if time_left.total_seconds() > 0:
-                    days = time_left.days
-                    hours = time_left.seconds // 3600
-                    minutes = (time_left.seconds % 3600) // 60
-                    seconds = time_left.seconds % 60
-                    
-                    if days > 0:
-                        profile_text += f"⏳ Осталось: {days}д {hours}ч {minutes}м\n"
-                    else:
-                        profile_text += f"⏳ Осталось: {hours}ч {minutes}м {seconds}с\n"
-                else:
-                    profile_text += f"⏳ Подписка истекла\n"
-            except:
-                profile_text += f"⏳ Ошибка формата даты\n"
-    
-    if has_key:
-        profile_text += f"\n🔑 Ключ: {('Защищен паролем' if has_password else 'Не защищен паролем')}\n"
-    
-    await message.answer(profile_text, reply_markup=get_profile_keyboard())
 
 @dp.callback_query(lambda c: c.data == "about")
 async def about_bot(callback: CallbackQuery):
@@ -804,7 +599,7 @@ async def process_admin_give_key(message: Message, state: FSMContext):
     await message.answer(
         f"✅ Подписка на {duration_type} успешно выдана пользователю {user_id}.\n"
         f"🔑 Ключ: <code>{user_key}</code>\n\n"
-        f"Пользователь может посмотреть ключ в профиле после установки пароля.",
+        f"Пользователь может посмотреть ключ в профиле.",
         parse_mode="HTML"
     )
     await state.clear()
@@ -833,7 +628,7 @@ async def admin_take_key(callback: CallbackQuery):
     
     # Создаем клавиатуру со списком пользователей
     keyboard = []
-    for user in subscribed_users[:20]:  # Ограничиваем 20 для удобства
+    for user in subscribed_users[:20]:
         user_id, username, first_name, sub_type, sub_end = user
         display_name = f"{first_name} (@{username})" if username else f"{first_name} (ID: {user_id})"
         keyboard.append([InlineKeyboardButton(
@@ -883,34 +678,6 @@ async def admin_ban_user(callback: CallbackQuery, state: FSMContext):
     )
     await state.set_state(AdminStates.waiting_for_ban_user_id)
     await callback.answer()
-
-@dp.message(AdminStates.waiting_for_ban_user_id)
-async def process_admin_ban(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        user_id = int(message.text)
-    except ValueError:
-        await message.answer("❌ Пожалуйста, введите корректный ID (только цифры).")
-        return
-    
-    # Проверяем, существует ли пользователь
-    user = get_user(user_id)
-    if not user:
-        await message.answer("❌ Пользователь с таким ID не найден.")
-        return
-    
-    ban_user(user_id)
-    await message.answer(f"✅ Пользователь {user_id} успешно забанен.")
-    await state.clear()
-    
-    # Возвращаемся в админ-панель
-    await message.answer(
-        "🔐 Админ-панель\n\n"
-        "Выберите действие:",
-        reply_markup=get_admin_keyboard()
-    )
 
 @dp.message(AdminStates.waiting_for_ban_user_id)
 async def process_admin_ban(message: Message, state: FSMContext):
@@ -1010,7 +777,7 @@ async def admin_list_users(callback: CallbackQuery):
         return
     
     text = "📋 Список пользователей:\n\n"
-    for user in users[:20]:  # Показываем первых 20
+    for user in users[:20]:
         user_id, username, first_name, sub_type, sub_end = user
         display_name = f"{first_name} (@{username})" if username else f"{first_name}"
         text += f"🆔 {user_id}: {display_name}\n"
