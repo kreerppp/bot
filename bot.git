@@ -76,7 +76,6 @@ def generate_keys(count=5000):
     if cursor.fetchone()[0] == 0:
         keys = []
         for _ in range(count):
-            # Генерация ключа формата crazy_info-{случайные символы}
             random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
             key = f"crazy_info-{random_str}"
             keys.append((key,))
@@ -125,10 +124,21 @@ def add_user(user_id, username, first_name):
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
     
-    cursor.execute('''
-        INSERT OR REPLACE INTO users (user_id, username, first_name)
-        VALUES (?, ?, ?)
-    ''', (user_id, username or "", first_name or ""))
+    # Проверяем, существует ли пользователь
+    cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
+    exists = cursor.fetchone()
+    
+    if not exists:
+        cursor.execute('''
+            INSERT INTO users (user_id, username, first_name, is_banned)
+            VALUES (?, ?, ?, FALSE)
+        ''', (user_id, username or "", first_name or ""))
+    else:
+        cursor.execute('''
+            UPDATE users 
+            SET username = ?, first_name = ?
+            WHERE user_id = ?
+        ''', (username or "", first_name or "", user_id))
     
     conn.commit()
     conn.close()
@@ -156,7 +166,7 @@ def update_subscription(user_id, subscription_type, end_datetime, user_key=None)
     else:
         cursor.execute('''
             UPDATE users 
-            SET subscription_type = ?, subscription_end = ?
+            SET subscription_type = ?, subscription_end = ?, user_key = NULL
             WHERE user_id = ?
         ''', (subscription_type, end_datetime, user_id))
     
@@ -295,9 +305,11 @@ async def start_command(message: Message):
     
     # Проверяем, не забанен ли пользователь
     user = get_user(user_id)
-    if user and user[5]:  # is_banned = TRUE
-        await message.answer("⛔ Вы забанены и не можете использовать бота.")
-        return
+    if user:
+        is_banned_index = 7 if len(user) > 7 else 5
+        if user[is_banned_index]:  # is_banned = TRUE
+            await message.answer("⛔ Вы забанены и не можете использовать бота.")
+            return
     
     await message.answer(
         "👋 Привет! Я бот для покупки ключей в программу Crazy Info.\n\n"
@@ -345,9 +357,11 @@ async def buy_key(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = get_user(user_id)
     
-    if user and user[5]:  # is_banned
-        await callback.answer("⛔ Вы забанены!", show_alert=True)
-        return
+    if user:
+        is_banned_index = 7 if len(user) > 7 else 5
+        if user[is_banned_index]:  # is_banned
+            await callback.answer("⛔ Вы забанены!", show_alert=True)
+            return
     
     await callback.message.edit_text(
         "⏳ Выберите срок, на который хотите купить ключ:",
@@ -361,9 +375,11 @@ async def process_payment(callback: CallbackQuery):
     
     # Проверка на бан
     user = get_user(user_id)
-    if user and user[5]:
-        await callback.answer("⛔ Вы забанены!", show_alert=True)
-        return
+    if user:
+        is_banned_index = 7 if len(user) > 7 else 5
+        if user[is_banned_index]:
+            await callback.answer("⛔ Вы забанены!", show_alert=True)
+            return
     
     prices = {
         "week": {"stars": 50, "text": "неделю", "days": 7},
@@ -393,15 +409,20 @@ async def show_profile(callback: CallbackQuery):
         await callback.answer("❌ Пользователь не найден.")
         return
     
-    if user[5]:  # is_banned
+    # Определяем индексы в зависимости от структуры таблицы
+    is_banned_index = 7 if len(user) > 7 else 5
+    user_key_index = 6 if len(user) > 6 else None
+    key_password_index = 7 if len(user) > 7 else None
+    
+    if user[is_banned_index]:  # is_banned
         await callback.answer("⛔ Вы забанены!", show_alert=True)
         return
     
     username = user[1] or "Не указан"
     subscription_type = user[3] or "Нет подписки"
     subscription_end = user[4]
-    has_key = user[6] is not None  # user_key
-    has_password = user[7] is not None  # key_password
+    has_key = user[user_key_index] is not None if user_key_index is not None else False
+    has_password = user[key_password_index] is not None if key_password_index is not None else False
     
     profile_text = f"👤 Профиль\n\n"
     profile_text += f"🆔 ID: {user_id}\n"
@@ -445,15 +466,20 @@ async def show_my_key(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Пользователь не найден.")
         return
     
-    if user[5]:  # is_banned
+    is_banned_index = 7 if len(user) > 7 else 5
+    user_key_index = 6 if len(user) > 6 else None
+    
+    if user[is_banned_index]:  # is_banned
         await callback.answer("⛔ Вы забанены!", show_alert=True)
         return
     
-    if user[6] is None:  # user_key
+    if user_key_index is None or user[user_key_index] is None:
         await callback.answer("❌ У вас нет ключа! Купите подписку.", show_alert=True)
         return
     
-    if user[7] is None:  # key_password
+    key_password_index = 7 if len(user) > 7 else None
+    
+    if key_password_index is None or user[key_password_index] is None:
         # Нет пароля - предлагаем создать
         await callback.message.edit_text(
             "🔐 У вас еще не установлен пароль для просмотра ключа.\n\n"
@@ -552,7 +578,7 @@ async def process_enter_password(message: Message, state: FSMContext):
         # Неправильный пароль
         await message.answer(
             "❌ Неправильный пароль!\n\n"
-            f"Попробуйте снова (осталось попыток: неограниченно):",
+            f"Попробуйте снова:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад в профиль", callback_data="profile")]
             ])
@@ -568,8 +594,10 @@ async def show_profile_callback(user_id, message):
     username = user[1] or "Не указан"
     subscription_type = user[3] or "Нет подписки"
     subscription_end = user[4]
-    has_key = user[6] is not None
-    has_password = user[7] is not None
+    user_key_index = 6 if len(user) > 6 else None
+    key_password_index = 7 if len(user) > 7 else None
+    has_key = user[user_key_index] is not None if user_key_index is not None else False
+    has_password = user[key_password_index] is not None if key_password_index is not None else False
     
     profile_text = f"👤 Профиль\n\n"
     profile_text += f"🆔 ID: {user_id}\n"
@@ -741,7 +769,7 @@ async def process_admin_give_key(message: Message, state: FSMContext):
     # Проверяем, существует ли пользователь
     user = get_user(user_id)
     if not user:
-        await message.answer("❌ Пользователь с таким ID не найден в базе данных.")
+        await message.answer("❌ Пользователь с таким ID не найден в базе данных.\n\nПользователь должен хотя бы раз запустить бота командой /start")
         return
     
     data = await state.get_data()
@@ -769,7 +797,8 @@ async def process_admin_give_key(message: Message, state: FSMContext):
     
     await message.answer(
         f"✅ Подписка на {duration_type} успешно выдана пользователю {user_id}.\n"
-        f"🔑 Ключ: <code>{user_key}</code>",
+        f"🔑 Ключ: <code>{user_key}</code>\n\n"
+        f"Пользователь может посмотреть ключ в профиле.",
         parse_mode="HTML"
     )
     await state.clear()
