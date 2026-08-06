@@ -32,7 +32,7 @@ def init_db():
             username TEXT,
             first_name TEXT,
             subscription_type TEXT,
-            subscription_end DATE,
+            subscription_end DATETIME,
             is_banned BOOLEAN DEFAULT FALSE,
             registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -94,7 +94,7 @@ def get_key():
     conn.close()
     return new_key
 
-# Добавление нового ключа при окончании подписки
+# Добавление нового ключа
 def add_new_key():
     random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
     new_key = f"crazy_info-{random_str}"
@@ -128,19 +128,15 @@ def get_user(user_id):
     conn.close()
     return user
 
-def update_subscription(user_id, subscription_type, days):
+def update_subscription(user_id, subscription_type, end_datetime):
     conn = sqlite3.connect('bot_database.db')
     cursor = conn.cursor()
-    
-    end_date = None
-    if subscription_type != "навсегда" and subscription_type is not None:
-        end_date = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
     
     cursor.execute('''
         UPDATE users 
         SET subscription_type = ?, subscription_end = ?
         WHERE user_id = ?
-    ''', (subscription_type, end_date, user_id))
+    ''', (subscription_type, end_datetime, user_id))
     
     conn.commit()
     conn.close()
@@ -200,6 +196,8 @@ class AdminStates(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_ban_user_id = State()
     selecting_key_duration = State()
+    waiting_for_custom_duration = State()
+    waiting_for_duration_value = State()
 
 # Клавиатуры
 def get_main_keyboard():
@@ -233,9 +231,10 @@ def get_admin_keyboard():
 
 def get_admin_duration_keyboard():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="На неделю", callback_data="admin_week")],
-        [InlineKeyboardButton(text="На месяц", callback_data="admin_month")],
-        [InlineKeyboardButton(text="Навсегда", callback_data="admin_forever")],
+        [InlineKeyboardButton(text="📅 На неделю", callback_data="admin_week")],
+        [InlineKeyboardButton(text="📅 На месяц", callback_data="admin_month")],
+        [InlineKeyboardButton(text="♾️ Навсегда", callback_data="admin_forever")],
+        [InlineKeyboardButton(text="⏱️ Свой срок", callback_data="admin_custom")],
         [InlineKeyboardButton(text="🔙 Назад в админку", callback_data="back_to_admin")]
     ])
     return keyboard
@@ -323,32 +322,21 @@ async def process_payment(callback: CallbackQuery):
         return
     
     prices = {
-        "week": {"stars": 50, "text": "неделю", "days": 7},
-        "month": {"stars": 100, "text": "месяц", "days": 30},
-        "forever": {"stars": 200, "text": "навсегда", "days": 9999}
+        "week": {"stars": 50, "text": "неделю"},
+        "month": {"stars": 100, "text": "месяц"},
+        "forever": {"stars": 200, "text": "навсегда"}
     }
     
     choice = prices[callback.data]
     
-    # Сначала отвечаем на callback, чтобы убрать загрузку
-    await callback.answer(f"⏳ Обработка запроса на {choice['text']}...")
+    # Сразу отвечаем на callback, чтобы убрать загрузку
+    await callback.answer()
     
-    # Выдаем ключ
-    key = get_key()
-    
-    # Обновляем подписку пользователя
-    update_subscription(user_id, f"на {choice['text']}", choice['days'])
-    
-    # Добавляем новый ключ для пополнения базы
-    add_new_key()
-    
-    # Отправляем сообщение с ключом
+    # Показываем контакт для покупки
     await callback.message.edit_text(
-        f"✅ Спасибо за покупку!\n"
-        f"🔑 Ваш ключ на {choice['text']}:\n"
-        f"<code>{key}</code>\n\n"
-        f"Сохраните его, он больше не будет показан.",
-        parse_mode="HTML",
+        f"💫 Для покупки ключа на {choice['text']} (стоимость: {choice['stars']} ⭐️)\n\n"
+        f"📩 Напишите @kreerppp1 для оформления.\n\n"
+        f"После оплаты вы получите ключ для активации программы Crazy Info.",
         reply_markup=get_main_keyboard()
     )
 
@@ -378,12 +366,23 @@ async def show_profile(callback: CallbackQuery):
         if subscription_type == "навсегда":
             profile_text += f"⏳ Срок: Навсегда\n"
         elif subscription_end:
-            end_date = datetime.strptime(subscription_end, '%Y-%m-%d')
-            days_left = (end_date - datetime.now()).days
-            if days_left > 0:
-                profile_text += f"⏳ Осталось дней: {days_left}\n"
-            else:
-                profile_text += f"⏳ Подписка истекла\n"
+            try:
+                end_date = datetime.strptime(subscription_end, '%Y-%m-%d %H:%M:%S.%f')
+                time_left = end_date - datetime.now()
+                if time_left.total_seconds() > 0:
+                    days = time_left.days
+                    hours = time_left.seconds // 3600
+                    minutes = (time_left.seconds % 3600) // 60
+                    seconds = time_left.seconds % 60
+                    
+                    if days > 0:
+                        profile_text += f"⏳ Осталось: {days}д {hours}ч {minutes}м\n"
+                    else:
+                        profile_text += f"⏳ Осталось: {hours}ч {minutes}м {seconds}с\n"
+                else:
+                    profile_text += f"⏳ Подписка истекла\n"
+            except:
+                profile_text += f"⏳ Ошибка формата даты\n"
     
     await callback.message.edit_text(profile_text, reply_markup=get_main_keyboard())
     await callback.answer()
@@ -423,17 +422,98 @@ async def admin_select_duration(callback: CallbackQuery, state: FSMContext):
     duration_map = {
         "admin_week": ("на неделю", 7),
         "admin_month": ("на месяц", 30),
-        "admin_forever": ("навсегда", 9999)
+        "admin_forever": ("навсегда", None)
     }
     
     duration_type, days = duration_map[callback.data]
-    await state.update_data(duration_type=duration_type, days=days)
+    
+    if duration_type == "навсегда":
+        await state.update_data(duration_type=duration_type, days=None, is_forever=True)
+        await callback.message.edit_text(
+            f"Введите ID пользователя, которому хотите выдать подписку {duration_type}:"
+        )
+        await state.set_state(AdminStates.waiting_for_user_id)
+    else:
+        await state.update_data(duration_type=duration_type, days=days, is_forever=False)
+        await callback.message.edit_text(
+            f"Введите ID пользователя, которому хотите выдать подписку {duration_type}:"
+        )
+        await state.set_state(AdminStates.waiting_for_user_id)
+    
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_custom")
+async def admin_custom_duration(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
     
     await callback.message.edit_text(
-        f"Введите ID пользователя, которому хотите выдать подписку на {duration_type}:"
+        "⏱️ Введите срок в формате:\n\n"
+        "1s - 1 секунда\n"
+        "5m - 5 минут\n"
+        "1h - 1 час\n"
+        "2d - 2 дня\n"
+        "1w - 1 неделя\n"
+        "1mo - 1 месяц\n\n"
+        "Пример: 30m, 2h, 7d"
+    )
+    await state.set_state(AdminStates.waiting_for_custom_duration)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_custom_duration)
+async def process_custom_duration(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    duration_str = message.text.lower().strip()
+    
+    # Парсим ввод
+    import re
+    match = re.match(r'^(\d+)([smhdwmo]+)$', duration_str)
+    
+    if not match:
+        await message.answer(
+            "❌ Неверный формат. Используйте:\n"
+            "1s, 5m, 2h, 3d, 1w, 1mo\n\n"
+            "Попробуйте снова:"
+        )
+        return
+    
+    value = int(match.group(1))
+    unit = match.group(2)
+    
+    # Конвертируем в секунды
+    seconds = 0
+    if unit == 's':
+        seconds = value
+    elif unit == 'm':
+        seconds = value * 60
+    elif unit == 'h':
+        seconds = value * 3600
+    elif unit == 'd':
+        seconds = value * 86400
+    elif unit == 'w':
+        seconds = value * 604800
+    elif unit == 'mo':
+        seconds = value * 2592000  # 30 дней
+    
+    if seconds <= 0:
+        await message.answer("❌ Срок должен быть больше 0. Попробуйте снова:")
+        return
+    
+    # Сохраняем в состояние
+    await state.update_data(
+        duration_type=f"на {duration_str}",
+        custom_seconds=seconds,
+        is_forever=False
+    )
+    
+    await message.answer(
+        f"✅ Установлен срок: {duration_str}\n\n"
+        f"Теперь введите ID пользователя, которому хотите выдать ключ:"
     )
     await state.set_state(AdminStates.waiting_for_user_id)
-    await callback.answer()
 
 @dp.message(AdminStates.waiting_for_user_id)
 async def process_admin_give_key(message: Message, state: FSMContext):
@@ -454,14 +534,23 @@ async def process_admin_give_key(message: Message, state: FSMContext):
     
     data = await state.get_data()
     duration_type = data.get('duration_type')
-    days = data.get('days')
+    is_forever = data.get('is_forever', False)
+    custom_seconds = data.get('custom_seconds')
+    
+    # Вычисляем дату окончания
+    end_datetime = None
+    if not is_forever:
+        if custom_seconds:
+            end_datetime = (datetime.now() + timedelta(seconds=custom_seconds)).strftime('%Y-%m-%d %H:%M:%S.%f')
+        else:
+            days = data.get('days')
+            if days:
+                end_datetime = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S.%f')
+    else:
+        duration_type = "навсегда"
     
     # Выдаем подписку
-    update_subscription(user_id, duration_type, days)
-    
-    # Если подписка не навсегда, добавляем новый ключ
-    if duration_type != "навсегда":
-        add_new_key()
+    update_subscription(user_id, duration_type, end_datetime)
     
     await message.answer(
         f"✅ Подписка на {duration_type} успешно выдана пользователю {user_id}."
@@ -492,12 +581,18 @@ async def admin_take_key(callback: CallbackQuery):
     
     # Создаем клавиатуру со списком пользователей
     keyboard = []
-    for user in subscribed_users:
+    for user in subscribed_users[:20]:  # Ограничиваем 20 для удобства
         user_id, username, first_name, sub_type, sub_end = user
         display_name = f"{first_name} (@{username})" if username else f"{first_name} (ID: {user_id})"
         keyboard.append([InlineKeyboardButton(
             text=f"🆔 {user_id} - {sub_type}",
             callback_data=f"take_key_{user_id}"
+        )])
+    
+    if len(subscribed_users) > 20:
+        keyboard.append([InlineKeyboardButton(
+            text=f"📊 Всего {len(subscribed_users)} пользователей",
+            callback_data="noop"
         )])
     
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_admin")])
@@ -517,7 +612,7 @@ async def process_take_key(callback: CallbackQuery):
     user_id = int(callback.data.split("_")[2])
     
     # Забираем подписку
-    update_subscription(user_id, None, 0)
+    update_subscription(user_id, None, None)
     
     await callback.message.edit_text(
         f"✅ Подписка у пользователя {user_id} успешно отобрана.",
@@ -582,12 +677,18 @@ async def admin_unban_user(callback: CallbackQuery):
     
     # Создаем клавиатуру со списком забаненных
     keyboard = []
-    for user in banned_users:
+    for user in banned_users[:20]:
         user_id, username, first_name = user
         display_name = f"{first_name} (@{username})" if username else f"{first_name} (ID: {user_id})"
         keyboard.append([InlineKeyboardButton(
             text=f"🆔 {user_id} - {display_name[:20]}",
             callback_data=f"unban_{user_id}"
+        )])
+    
+    if len(banned_users) > 20:
+        keyboard.append([InlineKeyboardButton(
+            text=f"📊 Всего {len(banned_users)} забаненных",
+            callback_data="noop"
         )])
     
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_admin")])
@@ -634,8 +735,17 @@ async def admin_list_users(callback: CallbackQuery):
         display_name = f"{first_name} (@{username})" if username else f"{first_name}"
         text += f"🆔 {user_id}: {display_name}\n"
         text += f"   📋 Подписка: {sub_type or 'Нет'}\n"
-        if sub_end:
-            text += f"   ⏳ До: {sub_end}\n"
+        if sub_end and sub_type != "навсегда":
+            try:
+                end_date = datetime.strptime(sub_end, '%Y-%m-%d %H:%M:%S.%f')
+                if end_date > datetime.now():
+                    text += f"   ⏳ До: {end_date.strftime('%Y-%m-%d %H:%M')}\n"
+                else:
+                    text += f"   ⏳ Истекла\n"
+            except:
+                text += f"   ⏳ До: {sub_end}\n"
+        elif sub_type == "навсегда":
+            text += f"   ⏳ Навсегда\n"
         text += "\n"
     
     if len(users) > 20:
@@ -689,14 +799,27 @@ async def admin_list_subscribed(callback: CallbackQuery):
         display_name = f"{first_name} (@{username})" if username else f"{first_name}"
         text += f"🆔 {user_id}: {display_name}\n"
         text += f"   📋 Подписка: {sub_type}\n"
-        if sub_end:
-            text += f"   ⏳ До: {sub_end}\n"
+        if sub_end and sub_type != "навсегда":
+            try:
+                end_date = datetime.strptime(sub_end, '%Y-%m-%d %H:%M:%S.%f')
+                if end_date > datetime.now():
+                    text += f"   ⏳ До: {end_date.strftime('%Y-%m-%d %H:%M')}\n"
+                else:
+                    text += f"   ⏳ Истекла\n"
+            except:
+                text += f"   ⏳ До: {sub_end}\n"
+        elif sub_type == "навсегда":
+            text += f"   ⏳ Навсегда\n"
         text += "\n"
     
     if len(subscribed) > 20:
         text += f"И ещё {len(subscribed) - 20} пользователей..."
     
     await callback.message.edit_text(text, reply_markup=get_admin_keyboard())
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "noop")
+async def noop(callback: CallbackQuery):
     await callback.answer()
 
 # Запуск бота
@@ -707,6 +830,7 @@ async def main():
     generate_keys(5000)
     
     print("✅ Бот запущен!")
+    print(f"👑 Админ ID: {ADMIN_ID}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
