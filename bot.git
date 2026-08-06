@@ -1,457 +1,723 @@
-import telebot
-from telebot import types
-import sqlite3
-import time
-import threading
-from datetime import datetime, timedelta
+import asyncio
+import json
 import random
+import string
+import sqlite3
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
-# ======== ЗАМЕНИТЕ НА СВОЙ ТОКЕН ========
-TOKEN = "8807533232:AAGduYtEaWBx6YYm4Z6QefHnYCwaiAvF0TI"  # <--- СЮДА ВСТАВЬТЕ СВОЙ ТОКЕН
-ADMIN_ID = 8987243077  # Ваш Telegram ID
+# Токен бота и ID админа
+BOT_TOKEN = "8905500667:AAFsyfnZD9C_LSBOdwFIqJ1_T7J0kGmRKuw"
+ADMIN_ID = 8568850073  # Твой ID
 
-bot = telebot.TeleBot(TOKEN)
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-# ======== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ========
+# Подключение к базе данных SQLite
 def init_db():
-    conn = sqlite3.connect('clicker.db', check_same_thread=False)
-    cur = conn.cursor()
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
     
     # Таблица пользователей
-    cur.execute('''
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            coins INTEGER DEFAULT 0,
-            clicks INTEGER DEFAULT 0,
-            rank INTEGER DEFAULT 1,
-            passive_income INTEGER DEFAULT 1,
-            click_power INTEGER DEFAULT 1,
-            last_claim TIMESTAMP,
-            total_coins_earned INTEGER DEFAULT 0
+            first_name TEXT,
+            subscription_type TEXT,
+            subscription_end DATE,
+            is_banned BOOLEAN DEFAULT FALSE,
+            registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
-    # Таблица улучшений (у каждого пользователя свои уровни)
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS upgrades (
-            user_id INTEGER,
-            upgrade_id INTEGER,
-            level INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, upgrade_id)
+    # Таблица ключей
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_value TEXT UNIQUE,
+            is_used BOOLEAN DEFAULT FALSE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
     conn.commit()
     conn.close()
 
-init_db()
+# Генерация ключей (5k+)
+def generate_keys(count=5000):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    # Проверяем, есть ли уже ключи
+    cursor.execute('SELECT COUNT(*) FROM keys')
+    if cursor.fetchone()[0] == 0:
+        keys = []
+        for _ in range(count):
+            # Генерация ключа формата crazy_info-{случайные символы}
+            random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+            key = f"crazy_info-{random_str}"
+            keys.append((key,))
+        
+        cursor.executemany('INSERT INTO keys (key_value) VALUES (?)', keys)
+        conn.commit()
+    
+    conn.close()
 
-# ======== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ========
+# Получение ключа из базы
+def get_key():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT key_value FROM keys WHERE is_used = FALSE LIMIT 1')
+    result = cursor.fetchone()
+    
+    if result:
+        key = result[0]
+        cursor.execute('UPDATE keys SET is_used = TRUE WHERE key_value = ?', (key,))
+        conn.commit()
+        conn.close()
+        return key
+    
+    # Если ключей нет, генерируем новый
+    random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    new_key = f"crazy_info-{random_str}"
+    cursor.execute('INSERT INTO keys (key_value) VALUES (?)', (new_key,))
+    conn.commit()
+    conn.close()
+    return new_key
+
+# Добавление нового ключа при окончании подписки
+def add_new_key():
+    random_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    new_key = f"crazy_info-{random_str}"
+    
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT INTO keys (key_value) VALUES (?)', (new_key,))
+    conn.commit()
+    conn.close()
+
+# Функции для работы с пользователями
+def add_user(user_id, username, first_name):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT OR REPLACE INTO users (user_id, username, first_name)
+        VALUES (?, ?, ?)
+    ''', (user_id, username or "", first_name or ""))
+    
+    conn.commit()
+    conn.close()
+
 def get_user(user_id):
-    conn = sqlite3.connect('clicker.db', check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    user = cur.fetchone()
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    user = cursor.fetchone()
+    
     conn.close()
     return user
 
-def create_user_if_not_exists(user_id, username):
-    conn = sqlite3.connect('clicker.db', check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    if not cur.fetchone():
-        cur.execute("INSERT INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
-        # Создаем начальные улучшения для пользователя
-        for i in range(1, 7):
-            cur.execute("INSERT INTO upgrades (user_id, upgrade_id) VALUES (?, ?)", (user_id, i))
-        conn.commit()
-    else:
-        # Обновляем username
-        cur.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
-        conn.commit()
-    conn.close()
-
-def get_upgrade_level(user_id, upgrade_id):
-    conn = sqlite3.connect('clicker.db', check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute("SELECT level FROM upgrades WHERE user_id = ? AND upgrade_id = ?", (user_id, upgrade_id))
-    result = cur.fetchone()
-    conn.close()
-    return result[0] if result else 0
-
-def update_upgrade(user_id, upgrade_id, level):
-    conn = sqlite3.connect('clicker.db', check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute("UPDATE upgrades SET level = ? WHERE user_id = ? AND upgrade_id = ?", (level, user_id, upgrade_id))
+def update_subscription(user_id, subscription_type, days):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    end_date = None
+    if subscription_type != "навсегда":
+        end_date = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+    
+    cursor.execute('''
+        UPDATE users 
+        SET subscription_type = ?, subscription_end = ?
+        WHERE user_id = ?
+    ''', (subscription_type, end_date, user_id))
+    
     conn.commit()
     conn.close()
 
-def get_rank_name(rank):
-    ranks = {
-        1: "🥉 Новичок",
-        2: "🥈 Любитель",
-        3: "🥇 Профессионал",
-        4: "💎 Мастер",
-        5: "💎 Эксперт",
-        6: "👑 Гроссмейстер",
-        7: "👑 Легенда",
-        8: "🔥 Император",
-        9: "🔥 Бог",
-        10: "🌟 Абсолют"
-    }
-    return ranks.get(rank, "🥉 Новичок")
-
-def get_next_rank_cost(rank):
-    return rank * 1000
-
-def get_passive_income(user_id):
-    total = 1
-    for i in range(1, 7):
-        level = get_upgrade_level(user_id, i)
-        if i == 1: total += level * 2      # Базовый доход
-        elif i == 2: total += level * 5    # Улучшенный доход
-        elif i == 3: total += level * 10   # Продвинутый
-        elif i == 4: total += level * 20   # Экспертный
-        elif i == 5: total += level * 50   # Мастерский
-        elif i == 6: total += level * 100  # Легендарный
-    return total
-
-def get_click_power(user_id):
-    base = 1
-    level = get_upgrade_level(user_id, 5)  # Улучшение клика
-    return base + level * 2
-
-# ======== ФУНКЦИЯ ПАССИВНОГО ДОХОДА ========
-def passive_income_loop():
-    while True:
-        time.sleep(60)  # Каждую минуту
-        conn = sqlite3.connect('clicker.db', check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users")
-        users = cur.fetchall()
-        
-        for user in users:
-            user_id = user[0]
-            income = get_passive_income(user_id)
-            cur.execute("UPDATE users SET coins = coins + ?, total_coins_earned = total_coins_earned + ? WHERE user_id = ?", 
-                       (income, income, user_id))
-        
-        conn.commit()
-        conn.close()
-
-# Запускаем поток для пассивного дохода
-threading.Thread(target=passive_income_loop, daemon=True).start()
-
-# ======== КЛАВИАТУРЫ ========
-def main_keyboard():
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    btn1 = types.InlineKeyboardButton("🖱 Клик!", callback_data="click")
-    btn2 = types.InlineKeyboardButton("💰 Баланс", callback_data="balance")
-    btn3 = types.InlineKeyboardButton("🏪 Магазин", callback_data="shop")
-    btn4 = types.InlineKeyboardButton("📊 Статистика", callback_data="stats")
-    btn5 = types.InlineKeyboardButton("👑 Топ игроков", callback_data="top")
-    btn6 = types.InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin")
-    keyboard.add(btn1, btn2)
-    keyboard.add(btn3, btn4)
-    keyboard.add(btn5, btn6)
-    return keyboard
-
-def admin_keyboard():
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    btn1 = types.InlineKeyboardButton("💰 Выдать монеты", callback_data="admin_give")
-    btn2 = types.InlineKeyboardButton("👑 Установить ранг", callback_data="admin_rank")
-    btn3 = types.InlineKeyboardButton("📢 Рассылка", callback_data="admin_mail")
-    btn4 = types.InlineKeyboardButton("📊 Статистика бота", callback_data="admin_stats")
-    btn5 = types.InlineKeyboardButton("🔙 Назад", callback_data="back")
-    keyboard.add(btn1, btn2)
-    keyboard.add(btn3, btn4)
-    keyboard.add(btn5)
-    return keyboard
-
-def shop_keyboard():
-    keyboard = types.InlineKeyboardMarkup(row_width=1)
-    upgrades = [
-        ("📈 Базовый доход", 1, 100),
-        ("📈 Улучшенный доход", 2, 300),
-        ("📈 Продвинутый доход", 3, 800),
-        ("📈 Экспертный доход", 4, 2000),
-        ("💪 Сила клика", 5, 500),
-        ("🌟 Легендарный доход", 6, 5000)
-    ]
-    for name, up_id, cost in upgrades:
-        btn = types.InlineKeyboardButton(f"{name} (Ур.{get_upgrade_level(message.chat.id, up_id) if 'message' in locals() else 0}) - {cost}🪙", 
-                                        callback_data=f"buy_{up_id}")
-        keyboard.add(btn)
+def get_all_users():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
     
-    btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back")
-    keyboard.add(btn_back)
+    cursor.execute('SELECT user_id, username, first_name, subscription_type, subscription_end FROM users WHERE is_banned = FALSE')
+    users = cursor.fetchall()
+    
+    conn.close()
+    return users
+
+def get_banned_users():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT user_id, username, first_name FROM users WHERE is_banned = TRUE')
+    users = cursor.fetchall()
+    
+    conn.close()
+    return users
+
+def get_subscribed_users():
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT user_id, username, first_name, subscription_type, subscription_end 
+        FROM users 
+        WHERE subscription_type IS NOT NULL AND is_banned = FALSE
+    ''')
+    users = cursor.fetchall()
+    
+    conn.close()
+    return users
+
+def ban_user(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('UPDATE users SET is_banned = TRUE WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def unban_user(user_id):
+    conn = sqlite3.connect('bot_database.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('UPDATE users SET is_banned = FALSE WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+# Состояния FSM
+class AdminStates(StatesGroup):
+    waiting_for_user_id = State()
+    waiting_for_ban_user_id = State()
+    selecting_key_duration = State()
+
+# Клавиатуры
+def get_main_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Купить ключ", callback_data="buy_key")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")]
+    ])
     return keyboard
 
-# ======== ОБРАБОТЧИКИ КОМАНД ========
-@bot.message_handler(commands=['start'])
-def start(message):
+def get_duration_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 На неделю (50 ⭐)", callback_data="week")],
+        [InlineKeyboardButton(text="📅 На месяц (100 ⭐)", callback_data="month")],
+        [InlineKeyboardButton(text="♾️ Навсегда (200 ⭐)", callback_data="forever")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
+    ])
+    return keyboard
+
+def get_admin_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 Выдать ключ", callback_data="admin_give_key")],
+        [InlineKeyboardButton(text="🗑️ Забрать ключ", callback_data="admin_take_key")],
+        [InlineKeyboardButton(text="🚫 Забанить пользователя", callback_data="admin_ban_user")],
+        [InlineKeyboardButton(text="✅ Разбанить пользователя", callback_data="admin_unban_user")],
+        [InlineKeyboardButton(text="📋 Список пользователей", callback_data="admin_list_users")],
+        [InlineKeyboardButton(text="⛔ Список забаненных", callback_data="admin_list_banned")],
+        [InlineKeyboardButton(text="🌟 Список с подпиской", callback_data="admin_list_subscribed")]
+    ])
+    return keyboard
+
+def get_admin_duration_keyboard():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="На неделю", callback_data="admin_week")],
+        [InlineKeyboardButton(text="На месяц", callback_data="admin_month")],
+        [InlineKeyboardButton(text="Навсегда", callback_data="admin_forever")],
+        [InlineKeyboardButton(text="🔙 Назад в админку", callback_data="back_to_admin")]
+    ])
+    return keyboard
+
+# Обработчики команд
+@dp.message(Command("start"))
+async def start_command(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username or "Unknown"
-    create_user_if_not_exists(user_id, username)
+    username = message.from_user.username
+    first_name = message.from_user.first_name
     
-    text = f"""👋 Добро пожаловать в Clicker Game!
-
-🎮 Твой игровой профиль:
-💰 Монет: {get_user(user_id)[2] if get_user(user_id) else 0}
-👑 Ранг: {get_rank_name(get_user(user_id)[4] if get_user(user_id) else 1)}
-💪 Сила клика: {get_click_power(user_id)}
-📈 Пассивный доход: {get_passive_income(user_id)} монет/мин
-
-🖱 Кликай, зарабатывай и улучшай своего персонажа!
-"""
-    bot.send_message(message.chat.id, text, reply_markup=main_keyboard())
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    user_id = call.from_user.id
-    username = call.from_user.username or "Unknown"
-    create_user_if_not_exists(user_id, username)
+    # Добавляем пользователя в базу
+    add_user(user_id, username, first_name)
     
-    # Получаем данные пользователя
+    # Проверяем, не забанен ли пользователь
     user = get_user(user_id)
-    if not user:
+    if user and user[5]:  # is_banned = TRUE
+        await message.answer("⛔ Вы забанены и не можете использовать бота.")
         return
     
-    # Обработка клика
-    if call.data == "click":
-        click_power = get_click_power(user_id)
-        new_coins = user[2] + click_power
-        new_total = user[6] + click_power
-        conn = sqlite3.connect('clicker.db', check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET coins = ?, clicks = clicks + 1, total_coins_earned = ? WHERE user_id = ?", 
-                   (new_coins, new_total, user_id))
-        conn.commit()
-        conn.close()
-        
-        # Анимация клика
-        bot.answer_callback_query(call.id, f"+{click_power} 🪙", show_alert=False)
-        bot.edit_message_text(f"🖱 +{click_power} монет!\n💰 Баланс: {new_coins}", 
-                             call.message.chat.id, call.message.message_id)
-        time.sleep(0.5)
-        bot.edit_message_text("Продолжай кликать! 👆", 
-                             call.message.chat.id, call.message.message_id)
-    
-    # Баланс
-    elif call.data == "balance":
-        user = get_user(user_id)
-        income = get_passive_income(user_id)
-        text = f"""💰 Твой баланс: {user[2]} монет
+    await message.answer(
+        "👋 Привет! Я бот для покупки ключей в программу Crazy Info.\n\n"
+        "Выбери нужную тебе категорию:",
+        reply_markup=get_main_keyboard()
+    )
 
-📈 Пассивный доход: {income} монет/мин
-🖱 Сила клика: {get_click_power(user_id)}
-👑 Ранг: {get_rank_name(user[4])}
-📊 Всего заработано: {user[6]} монет
-🔄 Всего кликов: {user[3]}"""
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_keyboard())
+@dp.message(Command("adminpanel"))
+async def admin_panel(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет доступа к админ-панели.")
+        return
     
-    # Магазин
-    elif call.data == "shop":
-        text = "🏪 Магазин улучшений:\n\nВыбери улучшение для покупки:"
-        keyboard = types.InlineKeyboardMarkup(row_width=1)
-        upgrades = [
-            ("📈 Базовый доход", 1, 100),
-            ("📈 Улучшенный доход", 2, 300),
-            ("📈 Продвинутый доход", 3, 800),
-            ("📈 Экспертный доход", 4, 2000),
-            ("💪 Сила клика", 5, 500),
-            ("🌟 Легендарный доход", 6, 5000)
-        ]
-        for name, up_id, cost in upgrades:
-            level = get_upgrade_level(user_id, up_id)
-            btn = types.InlineKeyboardButton(f"{name} (Ур.{level}) - {cost * (level + 1)}🪙", 
-                                            callback_data=f"buy_{up_id}")
-            keyboard.add(btn)
-        
-        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back")
-        keyboard.add(btn_back)
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=keyboard)
-    
-    # Покупка улучшения
-    elif call.data.startswith("buy_"):
-        up_id = int(call.data.split("_")[1])
-        level = get_upgrade_level(user_id, up_id)
-        
-        costs = {
-            1: 100,
-            2: 300,
-            3: 800,
-            4: 2000,
-            5: 500,
-            6: 5000
-        }
-        cost = costs[up_id] * (level + 1)
-        
-        if user[2] >= cost:
-            new_level = level + 1
-            update_upgrade(user_id, up_id, new_level)
-            
-            # Списываем монеты
-            conn = sqlite3.connect('clicker.db', check_same_thread=False)
-            cur = conn.cursor()
-            cur.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (cost, user_id))
-            conn.commit()
-            conn.close()
-            
-            bot.answer_callback_query(call.id, f"✅ Улучшение куплено! Теперь уровень {new_level}")
-            bot.edit_message_text(f"✅ Улучшение повышено до {new_level} уровня!\n💰 Остаток: {user[2] - cost} монет",
-                                 call.message.chat.id, call.message.message_id)
-            # Обновляем магазин
-            time.sleep(1)
-            callback_query(call)  # Перезагружаем магазин
-        else:
-            bot.answer_callback_query(call.id, f"❌ Не хватает монет! Нужно {cost}", show_alert=True)
-    
-    # Статистика
-    elif call.data == "stats":
-        user = get_user(user_id)
-        income = get_passive_income(user_id)
-        text = f"""📊 Твоя статистика:
+    await message.answer(
+        "🔐 Админ-панель\n\n"
+        "Выберите действие:",
+        reply_markup=get_admin_keyboard()
+    )
 
-👤 Имя: @{user[1] if user[1] else 'Unknown'}
-🆔 ID: {user_id}
-💰 Монет: {user[2]}
-🖱 Кликов: {user[3]}
-👑 Ранг: {get_rank_name(user[4])}
-💪 Сила клика: {get_click_power(user_id)}
-📈 Пассивный доход: {income} монет/мин
-🏆 Всего заработано: {user[6]} монет
+# Обработчики callback-запросов
+@dp.callback_query(lambda c: c.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "👋 Привет! Я бот для покупки ключей в программу Crazy Info.\n\n"
+        "Выбери нужную тебе категорию:",
+        reply_markup=get_main_keyboard()
+    )
+    await callback.answer()
 
-📅 Дата регистрации: {datetime.now().strftime('%d.%m.%Y')}"""
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_keyboard())
+@dp.callback_query(lambda c: c.data == "back_to_admin")
+async def back_to_admin(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
     
-    # Топ игроков
-    elif call.data == "top":
-        conn = sqlite3.connect('clicker.db', check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("SELECT user_id, username, coins, rank FROM users ORDER BY coins DESC LIMIT 10")
-        top_users = cur.fetchall()
-        conn.close()
-        
-        text = "👑 Топ-10 игроков по монетам:\n\n"
-        for i, (uid, username, coins, rank) in enumerate(top_users, 1):
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-            text += f"{medal} @{username or 'Unknown'} - {coins}🪙 ({get_rank_name(rank)})\n"
-        
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_keyboard())
-    
-    # Админ-панель
-    elif call.data == "admin":
-        if user_id != ADMIN_ID:
-            bot.answer_callback_query(call.id, "⛔ Доступ запрещен!", show_alert=True)
-            return
-        text = "👨‍💼 Админ-панель\n\nВыбери действие:"
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=admin_keyboard())
-    
-    # Выдача монет (админ)
-    elif call.data == "admin_give":
-        if user_id != ADMIN_ID:
-            bot.answer_callback_query(call.id, "⛔ Доступ запрещен!", show_alert=True)
-            return
-        msg = bot.send_message(call.message.chat.id, "Введите ID пользователя и количество монет через пробел:\nПример: `123456789 1000`", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, admin_give_coins)
-    
-    # Установка ранга (админ)
-    elif call.data == "admin_rank":
-        if user_id != ADMIN_ID:
-            bot.answer_callback_query(call.id, "⛔ Доступ запрещен!", show_alert=True)
-            return
-        msg = bot.send_message(call.message.chat.id, "Введите ID пользователя и номер ранга (1-10) через пробел:\nПример: `123456789 5`", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, admin_set_rank)
-    
-    # Рассылка (админ)
-    elif call.data == "admin_mail":
-        if user_id != ADMIN_ID:
-            bot.answer_callback_query(call.id, "⛔ Доступ запрещен!", show_alert=True)
-            return
-        msg = bot.send_message(call.message.chat.id, "Введите текст для рассылки:")
-        bot.register_next_step_handler(msg, admin_mail)
-    
-    # Статистика бота (админ)
-    elif call.data == "admin_stats":
-        if user_id != ADMIN_ID:
-            bot.answer_callback_query(call.id, "⛔ Доступ запрещен!", show_alert=True)
-            return
-        conn = sqlite3.connect('clicker.db', check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM users")
-        total_users = cur.fetchone()[0]
-        cur.execute("SELECT SUM(coins) FROM users")
-        total_coins = cur.fetchone()[0] or 0
-        cur.execute("SELECT SUM(clicks) FROM users")
-        total_clicks = cur.fetchone()[0] or 0
-        conn.close()
-        
-        text = f"""📊 Статистика бота:
+    await callback.message.edit_text(
+        "🔐 Админ-панель\n\n"
+        "Выберите действие:",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
 
-👥 Всего пользователей: {total_users}
-💰 Всего монет в системе: {total_coins}
-🖱 Всего кликов: {total_clicks}
-👑 Максимальный ранг: {get_rank_name(10)}
-📈 Пассивный доход: до 600+ монет/мин
-
-🕒 Активен: 24/7"""
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=admin_keyboard())
+@dp.callback_query(lambda c: c.data == "buy_key")
+async def buy_key(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(user_id)
     
-    # Назад
-    elif call.data == "back":
-        start(call.message)
+    if user and user[5]:  # is_banned
+        await callback.answer("⛔ Вы забанены!", show_alert=True)
+        return
+    
+    await callback.message.edit_text(
+        "⏳ Выберите срок, на который хотите купить ключ:",
+        reply_markup=get_duration_keyboard()
+    )
+    await callback.answer()
 
-# ======== АДМИН-ФУНКЦИИ ========
-def admin_give_coins(message):
+@dp.callback_query(lambda c: c.data in ["week", "month", "forever"])
+async def process_payment(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # Проверка на бан
+    user = get_user(user_id)
+    if user and user[5]:
+        await callback.answer("⛔ Вы забанены!", show_alert=True)
+        return
+    
+    prices = {
+        "week": {"stars": 50, "text": "неделю", "days": 7},
+        "month": {"stars": 100, "text": "месяц", "days": 30},
+        "forever": {"stars": 200, "text": "навсегда", "days": 9999}
+    }
+    
+    choice = prices[callback.data]
+    
+    # Создаем инвойс для оплаты звездами
+    await callback.message.answer(
+        f"💫 Оплатите {choice['stars']} звезд для получения ключа на {choice['text']}.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"⭐ Оплатить {choice['stars']} звезд",
+                pay=True
+            )]
+        ])
+    )
+    
+    # В реальном боте здесь был бы процесс оплаты через Telegram Stars
+    # Для демонстрации сразу выдаем ключ
+    await callback.answer(f"Оплата на {choice['text']}...", show_alert=True)
+    
+    # Выдаем ключ
+    key = get_key()
+    
+    # Обновляем подписку пользователя
+    update_subscription(user_id, f"на {choice['text']}", choice['days'])
+    
+    # Добавляем новый ключ для пополнения базы
+    add_new_key()
+    
+    await callback.message.answer(
+        f"✅ Спасибо за покупку!\n"
+        f"🔑 Ваш ключ на {choice['text']}:\n"
+        f"<code>{key}</code>\n\n"
+        f"Сохраните его, он больше не будет показан.",
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(lambda c: c.data == "profile")
+async def show_profile(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ Пользователь не найден.")
+        return
+    
+    if user[5]:  # is_banned
+        await callback.answer("⛔ Вы забанены!", show_alert=True)
+        return
+    
+    username = user[1] or "Не указан"
+    subscription_type = user[3] or "Нет подписки"
+    subscription_end = user[4]
+    
+    profile_text = f"👤 Профиль\n\n"
+    profile_text += f"🆔 ID: {user_id}\n"
+    profile_text += f"👤 Ник: @{username}\n"
+    profile_text += f"📋 Подписка: {subscription_type}\n"
+    
+    if subscription_type and subscription_type != "Нет подписки":
+        if subscription_type == "навсегда":
+            profile_text += f"⏳ Срок: Навсегда\n"
+        elif subscription_end:
+            end_date = datetime.strptime(subscription_end, '%Y-%m-%d')
+            days_left = (end_date - datetime.now()).days
+            if days_left > 0:
+                profile_text += f"⏳ Осталось дней: {days_left}\n"
+            else:
+                profile_text += f"⏳ Подписка истекла\n"
+    
+    await callback.message.edit_text(profile_text, reply_markup=get_main_keyboard())
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "about")
+async def about_bot(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🤖 О боте\n\n"
+        "Этот бот создан для покупки ключей доступа к программе Crazy Info.\n"
+        "Вы можете приобрести подписку на неделю, месяц или навсегда.\n"
+        "После оплаты вы получите уникальный ключ для активации программы.\n\n"
+        "По всем вопросам обращайтесь к администратору.",
+        reply_markup=get_main_keyboard()
+    )
+    await callback.answer()
+
+# Админские обработчики
+@dp.callback_query(lambda c: c.data == "admin_give_key")
+async def admin_give_key(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    await callback.message.edit_text(
+        "🔑 Выберите срок для выдачи ключа:",
+        reply_markup=get_admin_duration_keyboard()
+    )
+    await state.set_state(AdminStates.selecting_key_duration)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("admin_") and c.data in ["admin_week", "admin_month", "admin_forever"])
+async def admin_select_duration(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    duration_map = {
+        "admin_week": ("на неделю", 7),
+        "admin_month": ("на месяц", 30),
+        "admin_forever": ("навсегда", 9999)
+    }
+    
+    duration_type, days = duration_map[callback.data]
+    await state.update_data(duration_type=duration_type, days=days)
+    
+    await callback.message.edit_text(
+        f"Введите ID пользователя, которому хотите выдать подписку на {duration_type}:"
+    )
+    await state.set_state(AdminStates.waiting_for_user_id)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_user_id)
+async def process_admin_give_key(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
     try:
-        target_id, amount = map(int, message.text.split())
-        conn = sqlite3.connect('clicker.db', check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET coins = coins + ?, total_coins_earned = total_coins_earned + ? WHERE user_id = ?", 
-                   (amount, amount, target_id))
-        conn.commit()
-        conn.close()
-        bot.send_message(message.chat.id, f"✅ Пользователю {target_id} выдано {amount} монет!")
-    except:
-        bot.send_message(message.chat.id, "❌ Ошибка! Введите ID и сумму через пробел.")
+        user_id = int(message.text)
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите корректный ID (только цифры).")
+        return
+    
+    # Проверяем, существует ли пользователь
+    user = get_user(user_id)
+    if not user:
+        await message.answer("❌ Пользователь с таким ID не найден в базе данных.")
+        return
+    
+    data = await state.get_data()
+    duration_type = data.get('duration_type')
+    days = data.get('days')
+    
+    # Выдаем подписку
+    update_subscription(user_id, duration_type, days)
+    
+    # Если подписка не навсегда, добавляем новый ключ
+    if duration_type != "навсегда":
+        add_new_key()
+    
+    await message.answer(
+        f"✅ Подписка на {duration_type} успешно выдана пользователю {user_id}."
+    )
+    await state.clear()
+    
+    # Возвращаемся в админ-панель
+    await message.answer(
+        "🔐 Админ-панель\n\n"
+        "Выберите действие:",
+        reply_markup=get_admin_keyboard()
+    )
 
-def admin_set_rank(message):
+@dp.callback_query(lambda c: c.data == "admin_take_key")
+async def admin_take_key(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    subscribed_users = get_subscribed_users()
+    if not subscribed_users:
+        await callback.message.edit_text(
+            "📭 Нет пользователей с активной подпиской.",
+            reply_markup=get_admin_keyboard()
+        )
+        await callback.answer()
+        return
+    
+    # Создаем клавиатуру со списком пользователей
+    keyboard = []
+    for user in subscribed_users:
+        user_id, username, first_name, sub_type, sub_end = user
+        display_name = f"{first_name} (@{username})" if username else f"{first_name} (ID: {user_id})"
+        keyboard.append([InlineKeyboardButton(
+            text=f"🆔 {user_id} - {sub_type}",
+            callback_data=f"take_key_{user_id}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_admin")])
+    
+    await callback.message.edit_text(
+        "📋 Выберите пользователя, у которого нужно забрать ключ:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("take_key_"))
+async def process_take_key(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    user_id = int(callback.data.split("_")[2])
+    
+    # Забираем подписку
+    update_subscription(user_id, None, 0)
+    
+    await callback.message.edit_text(
+        f"✅ Подписка у пользователя {user_id} успешно отобрана.",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_ban_user")
+async def admin_ban_user(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    await callback.message.edit_text(
+        "🚫 Введите ID пользователя, которого хотите забанить:"
+    )
+    await state.set_state(AdminStates.waiting_for_ban_user_id)
+    await callback.answer()
+
+@dp.message(AdminStates.waiting_for_ban_user_id)
+async def process_admin_ban(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
     try:
-        target_id, rank = map(int, message.text.split())
-        if rank < 1 or rank > 10:
-            bot.send_message(message.chat.id, "❌ Ранг должен быть от 1 до 10!")
-            return
-        conn = sqlite3.connect('clicker.db', check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET rank = ? WHERE user_id = ?", (rank, target_id))
-        conn.commit()
-        conn.close()
-        bot.send_message(message.chat.id, f"✅ Пользователю {target_id} установлен ранг {rank} ({get_rank_name(rank)})!")
-    except:
-        bot.send_message(message.chat.id, "❌ Ошибка! Введите ID и ранг через пробел.")
-
-def admin_mail(message):
-    text = message.text
-    conn = sqlite3.connect('clicker.db', check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users")
-    users = cur.fetchall()
-    conn.close()
+        user_id = int(message.text)
+    except ValueError:
+        await message.answer("❌ Пожалуйста, введите корректный ID (только цифры).")
+        return
     
-    sent = 0
-    for user in users:
-        try:
-            bot.send_message(user[0], f"📢 Администрация бота:\n\n{text}")
-            sent += 1
-            time.sleep(0.1)  # Чтобы не заблокировали
-        except:
-            pass
+    # Проверяем, существует ли пользователь
+    user = get_user(user_id)
+    if not user:
+        await message.answer("❌ Пользователь с таким ID не найден.")
+        return
     
-    bot.send_message(message.chat.id, f"✅ Рассылка отправлена {sent} пользователям!")
+    ban_user(user_id)
+    await message.answer(f"✅ Пользователь {user_id} успешно забанен.")
+    await state.clear()
+    
+    # Возвращаемся в админ-панель
+    await message.answer(
+        "🔐 Админ-панель\n\n"
+        "Выберите действие:",
+        reply_markup=get_admin_keyboard()
+    )
 
-# ======== ЗАПУСК БОТА ========
+@dp.callback_query(lambda c: c.data == "admin_unban_user")
+async def admin_unban_user(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    banned_users = get_banned_users()
+    if not banned_users:
+        await callback.message.edit_text(
+            "📭 Нет забаненных пользователей.",
+            reply_markup=get_admin_keyboard()
+        )
+        await callback.answer()
+        return
+    
+    # Создаем клавиатуру со списком забаненных
+    keyboard = []
+    for user in banned_users:
+        user_id, username, first_name = user
+        display_name = f"{first_name} (@{username})" if username else f"{first_name} (ID: {user_id})"
+        keyboard.append([InlineKeyboardButton(
+            text=f"🆔 {user_id} - {display_name[:20]}",
+            callback_data=f"unban_{user_id}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_admin")])
+    
+    await callback.message.edit_text(
+        "📋 Выберите пользователя для разбана:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("unban_"))
+async def process_unban(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    user_id = int(callback.data.split("_")[1])
+    unban_user(user_id)
+    
+    await callback.message.edit_text(
+        f"✅ Пользователь {user_id} успешно разбанен.",
+        reply_markup=get_admin_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_list_users")
+async def admin_list_users(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    users = get_all_users()
+    if not users:
+        await callback.message.edit_text(
+            "📭 Нет зарегистрированных пользователей.",
+            reply_markup=get_admin_keyboard()
+        )
+        await callback.answer()
+        return
+    
+    text = "📋 Список пользователей:\n\n"
+    for user in users[:20]:  # Показываем первых 20
+        user_id, username, first_name, sub_type, sub_end = user
+        display_name = f"{first_name} (@{username})" if username else f"{first_name}"
+        text += f"🆔 {user_id}: {display_name}\n"
+        text += f"   📋 Подписка: {sub_type or 'Нет'}\n"
+        if sub_end:
+            text += f"   ⏳ До: {sub_end}\n"
+        text += "\n"
+    
+    if len(users) > 20:
+        text += f"И ещё {len(users) - 20} пользователей..."
+    
+    await callback.message.edit_text(text, reply_markup=get_admin_keyboard())
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_list_banned")
+async def admin_list_banned(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    banned = get_banned_users()
+    if not banned:
+        await callback.message.edit_text(
+            "📭 Нет забаненных пользователей.",
+            reply_markup=get_admin_keyboard()
+        )
+        await callback.answer()
+        return
+    
+    text = "⛔ Список забаненных пользователей:\n\n"
+    for user in banned:
+        user_id, username, first_name = user
+        display_name = f"{first_name} (@{username})" if username else f"{first_name}"
+        text += f"🆔 {user_id}: {display_name}\n"
+    
+    await callback.message.edit_text(text, reply_markup=get_admin_keyboard())
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_list_subscribed")
+async def admin_list_subscribed(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ У вас нет доступа.")
+        return
+    
+    subscribed = get_subscribed_users()
+    if not subscribed:
+        await callback.message.edit_text(
+            "📭 Нет пользователей с подпиской.",
+            reply_markup=get_admin_keyboard()
+        )
+        await callback.answer()
+        return
+    
+    text = "🌟 Список пользователей с подпиской:\n\n"
+    for user in subscribed[:20]:
+        user_id, username, first_name, sub_type, sub_end = user
+        display_name = f"{first_name} (@{username})" if username else f"{first_name}"
+        text += f"🆔 {user_id}: {display_name}\n"
+        text += f"   📋 Подписка: {sub_type}\n"
+        if sub_end:
+            text += f"   ⏳ До: {sub_end}\n"
+        text += "\n"
+    
+    if len(subscribed) > 20:
+        text += f"И ещё {len(subscribed) - 20} пользователей..."
+    
+    await callback.message.edit_text(text, reply_markup=get_admin_keyboard())
+    await callback.answer()
+
+# Запуск бота
+async def main():
+    # Инициализация базы данных
+    init_db()
+    # Генерация ключей, если их нет
+    generate_keys(5000)
+    
+    print("✅ Бот запущен!")
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    print("🤖 Бот запущен!")
-    bot.polling(none_stop=True)
+    asyncio.run(main())
